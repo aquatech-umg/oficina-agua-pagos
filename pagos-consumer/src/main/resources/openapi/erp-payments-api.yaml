@@ -1,0 +1,657 @@
+# =============================================================================
+# ERP Municipal Simulado — Contrato OpenAPI (Feature 3: envío de pagos vía colas)
+# -----------------------------------------------------------------------------
+# Este archivo es el CONTRATO que entrega el docente. Los equipos NO lo modifican:
+# lo copian a su proyecto (src/main/resources/openapi/) y generan con él un
+# cliente Feign usando openapi-generator-maven-plugin (library = spring-cloud).
+#
+# A propósito, el ERP NO pide el mismo formato que el banco. Diferencias del ERP
+# (simula un sistema "legado" de la municipalidad):
+#   - Nombres en español y snake_case (codigo_cliente, forma_pago...).
+#   - La unicidad va en el BODY: documento_origen.numero (no hay Idempotency-Key).
+#   - Montos como TEXTO decimal con 2 decimales exactos: "150.75".
+#   - Periodo fiscal como objeto { anio, mes } en vez de "YYYY-MM".
+#   - El pago se desglosa en líneas de DETALLE por rubro; la suma debe cuadrar con el total.
+#   - Catálogos propios (EFECTIVO, TARJETA...; AGUA_POTABLE, MORA...).
+#   - Formato de error propio (codigo_error, reintentable...).
+#
+# Perfil de fallos del ERP: falla menos que el banco, pero es más LENTO.
+# =============================================================================
+openapi: 3.0.3
+
+info:
+  # Título en ASCII simple: openapi-generator lo usa para nombrar la propiedad
+  # de la API key (erppaymentssimulator.security.apiKeyAuth.key).
+  title: ERP Payments Simulator API
+  version: 1.0.0
+  description: |
+    Simulador del **ERP de la municipalidad** que registra contablemente los pagos
+    cobrados por la Oficina del Agua. Corre en AWS (API Gateway + Lambda + DynamoDB)
+    y es el mismo para los 4 equipos.
+
+    **Reglas clave del contrato**
+
+    1. **Unicidad por documento:** cada pago se identifica por
+       `(equipo, documento_origen.numero)`. El número debe ser **estable** (derivado
+       del pago del monolito, por ejemplo `EQA-000123`).
+    2. **Reenvío del mismo documento** (mismos datos) → `409` con
+       `codigo_error = DOCUMENTO_DUPLICADO` y el comprobante original en
+       `comprobante_original`. Para el consumidor significa **"ya estaba entregado"**.
+    3. **Mismo número de documento con datos distintos** → `409` con
+       `codigo_error = DOCUMENTO_REUTILIZADO`. Error del productor: dead-letter.
+    4. **Fallos transitorios a propósito:** `429`, `500`, `502`, `503`, `504` y
+       timeouts del lado del cliente. Se **reintentan** con backoff.
+    5. **Rechazos de negocio** (`422`) y validación (`400`) **no** se reintentan.
+
+    **Montos:** texto con exactamente 2 decimales (`"150.75"`, `"89.50"`). La suma de
+    `detalle[].monto` debe ser igual a `total`.
+
+    **Autenticación:** header `x-api-key` con la llave entregada a cada equipo.
+    La llave identifica al equipo; el campo `equipo` del body debe coincidir.
+
+    **Timeouts recomendados en el cliente:** connect 2 s, read 3 s.
+  contact:
+    name: Docente — Desarrollo Web UMG
+    email: wcordovz1@umg.edu.gt
+
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
+    description: Simulador desplegado por el docente en AWS
+    variables:
+      apiId:
+        default: REEMPLAZAR_API_ID
+        description: Id del API Gateway (lo comparte el docente)
+      region:
+        default: us-east-1
+      stage:
+        default: prod
+  - url: http://localhost:3000
+    description: Ejecución local con `sam local start-api` (opcional)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: ErpPagos
+    description: Registro y consulta de pagos en el ERP municipal simulado
+  - name: ErpSalud
+    description: Verificación de disponibilidad (sin API key)
+
+paths:
+  /erp/v1/pagos:
+    post:
+      tags: [ErpPagos]
+      operationId: registrarPagoErp
+      summary: Registra contablemente un pago cobrado por la Oficina del Agua
+      description: |
+        Crea la partida contable del pago. La operación es **idempotente por
+        `documento_origen.numero`**: el ERP nunca registra dos veces el mismo documento.
+
+        Puede tardar más de lo normal o fallar de forma transitoria a propósito
+        (simulación). El cliente debe tener timeout y reintentar solo los casos
+        marcados como reintentables.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/SimulationScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErpRegistroPago'
+            examples:
+              pagoConMora:
+                summary: Pago de Q150.75 = servicio Q140.75 + mora Q10.00
+                value:
+                  equipo: EQUIPO_A
+                  documento_origen:
+                    tipo: RECIBO_CAJA
+                    numero: EQA-000123
+                    fecha_emision: '2026-10-01'
+                  contribuyente:
+                    codigo_cliente: CLI-0001
+                    codigo_contador: MTR-00001
+                    nit: CF
+                  periodo_fiscal:
+                    anio: 2026
+                    mes: 9
+                  forma_pago: EFECTIVO
+                  fecha_pago: '2026-10-01T10:15:00-06:00'
+                  total: '150.75'
+                  detalle:
+                    - rubro: AGUA_POTABLE
+                      descripcion: Consumo septiembre 2026
+                      monto: '140.75'
+                    - rubro: MORA
+                      monto: '10.00'
+      responses:
+        '201':
+          description: Pago contabilizado en el ERP. **No reintentar.**
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpComprobante'
+        '400':
+          $ref: '#/components/responses/ErrorValidacion'
+        '403':
+          $ref: '#/components/responses/Prohibido'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/RechazoNegocio'
+        '429':
+          $ref: '#/components/responses/DemasiadasSolicitudes'
+        '500':
+          $ref: '#/components/responses/ErrorInterno'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/NoDisponible'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /erp/v1/pagos/{numeroDocumento}:
+    get:
+      tags: [ErpPagos]
+      operationId: consultarPagoErp
+      summary: Consulta si un documento ya fue registrado en el ERP
+      description: |
+        Útil para **reconciliar** después de un timeout: si el cliente no recibió
+        respuesta, puede preguntar si el ERP sí alcanzó a registrar el pago.
+        Solo devuelve documentos del equipo dueño de la API key.
+      parameters:
+        - name: numeroDocumento
+          in: path
+          required: true
+          description: El mismo `documento_origen.numero` usado en el POST
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 40
+            pattern: '^[A-Za-z0-9_-]+$'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: El documento existe en el ERP
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpComprobante'
+        '403':
+          $ref: '#/components/responses/Prohibido'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '429':
+          $ref: '#/components/responses/DemasiadasSolicitudes'
+        '500':
+          $ref: '#/components/responses/ErrorInterno'
+        '503':
+          $ref: '#/components/responses/NoDisponible'
+
+  /erp/v1/salud:
+    get:
+      tags: [ErpSalud]
+      operationId: consultarSaludErp
+      summary: Estado del simulador (no requiere API key)
+      security: []
+      responses:
+        '200':
+          description: El simulador está disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpSalud'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      # API Gateway (REST) exige exactamente este nombre de header.
+      name: x-api-key
+
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: |
+        Id para trazar una petición entre servicios (productor → cola → consumidor →
+        ERP). Si no se envía, el simulador genera uno y lo devuelve.
+      schema:
+        type: string
+        maxLength: 64
+    SimulationScenario:
+      name: X-Simulation-Scenario
+      in: header
+      required: false
+      description: |
+        **Solo para pruebas.** Fuerza un escenario en vez del comportamiento
+        aleatorio. El docente puede deshabilitarlo (por ejemplo el día de la demo);
+        en ese caso se ignora y se usa `AUTO`.
+
+        | Valor | Qué simula |
+        |---|---|
+        | `AUTO` | Comportamiento aleatorio configurado (default) |
+        | `SUCCESS` | Sin fallos ni retardos extra |
+        | `SLOW` | Responde bien pero tarda 1.5–2.5 s (dentro del timeout) |
+        | `TIMEOUT` | Tarda 4–8 s **sin registrar** el pago (el cliente debe cortar) |
+        | `LOST_ACK` | **Registra** el pago y luego tarda 4–8 s (el reintento verá 409) |
+        | `ERROR_500` | Error interno sin registrar el pago |
+        | `ERROR_503` | Servicio no disponible, con `Retry-After` |
+        | `RATE_LIMIT` | `429` simulado, con `Retry-After` |
+      schema:
+        type: string
+        enum: [AUTO, SUCCESS, SLOW, TIMEOUT, LOST_ACK, ERROR_500, ERROR_503, RATE_LIMIT]
+        default: AUTO
+
+  headers:
+    CorrelationId:
+      description: Id de correlación (el recibido o uno generado por el simulador)
+      schema:
+        type: string
+    RetryAfter:
+      description: Segundos que el cliente debería esperar antes de reintentar
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    ErrorValidacion:
+      description: |
+        El body no cumple el contrato. **No reintentar** → corregir el mapeo / dead-letter.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          example:
+            estado_http: 400
+            codigo_error: VALIDACION
+            mensaje: La solicitud no cumple el contrato
+            reintentable: false
+            id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+            fecha_hora: '2026-10-07T23:15:00Z'
+            errores:
+              - campo: total
+                mensaje: 'debe tener exactamente 2 decimales, por ejemplo "150.50"'
+              - campo: periodo_fiscal.mes
+                mensaje: debe estar entre 1 y 12
+    Prohibido:
+      description: |
+        API key ausente o inválida (respuesta de API Gateway: `{"message":"Forbidden"}`),
+        o el `equipo` del body no corresponde a la API key
+        (`codigo_error = EQUIPO_NO_COINCIDE`). **No reintentar.**
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+    NoEncontrado:
+      description: No hay documento con ese número para este equipo. **No reintentar.**
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          example:
+            estado_http: 404
+            codigo_error: DOCUMENTO_NO_ENCONTRADO
+            mensaje: No existe el documento EQA-000999 para el equipo
+            reintentable: false
+            id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+            fecha_hora: '2026-10-07T23:15:00Z'
+    Conflicto:
+      description: |
+        El documento ya existe en el ERP. **No reintentar.**
+
+        - `DOCUMENTO_DUPLICADO`: mismos datos → tratar como **entregado** (ack).
+          Incluye `comprobante_original`.
+        - `DOCUMENTO_REUTILIZADO`: mismo número con datos distintos → dead-letter.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          examples:
+            duplicado:
+              summary: Reenvío del mismo documento (por ejemplo, después de un timeout)
+              value:
+                estado_http: 409
+                codigo_error: DOCUMENTO_DUPLICADO
+                mensaje: El documento EQA-000123 ya fue contabilizado
+                reintentable: false
+                id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+                fecha_hora: '2026-10-07T23:15:05Z'
+                comprobante_original:
+                  numero_comprobante: ERP-20261007-Q7W2ZX
+                  numero_documento_origen: EQA-000123
+                  equipo: EQUIPO_A
+                  estado: CONTABILIZADO
+                  total: '150.75'
+                  fecha_registro: '2026-10-07T23:14:58Z'
+                  periodo_contable:
+                    anio: 2026
+                    mes: 10
+                  numero_partida: PDA-2026-000873
+            reutilizado:
+              summary: Mismo número de documento con otro total
+              value:
+                estado_http: 409
+                codigo_error: DOCUMENTO_REUTILIZADO
+                mensaje: El documento EQA-000123 ya existe con datos diferentes
+                reintentable: false
+                id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+                fecha_hora: '2026-10-07T23:16:00Z'
+    RechazoNegocio:
+      description: |
+        El ERP rechaza el pago por una regla contable. **No reintentar.**
+
+        | `codigo_error` | Causa |
+        |---|---|
+        | `PERIODO_CERRADO` | `periodo_fiscal` con más de 12 meses de antigüedad |
+        | `PERIODO_FUTURO` | `periodo_fiscal` posterior al mes siguiente al actual |
+        | `TOTAL_NO_CUADRA` | La suma de `detalle[].monto` es distinta de `total` |
+        | `DESCRIPCION_REQUERIDA` | Línea con `rubro = OTROS` sin `descripcion` |
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          example:
+            estado_http: 422
+            codigo_error: TOTAL_NO_CUADRA
+            mensaje: 'La suma del detalle (140.75) no coincide con el total (150.75)'
+            reintentable: false
+            id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+            fecha_hora: '2026-10-07T23:15:00Z'
+    DemasiadasSolicitudes:
+      description: |
+        Límite de peticiones excedido. **Reintentar** respetando `Retry-After`
+        (si viene) o con backoff exponencial. Si lo genera API Gateway el body es
+        `{"message":"Too Many Requests"}` y no trae `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+    ErrorInterno:
+      description: |
+        Error interno del simulador. El pago **no** quedó registrado.
+        **Reintentar** con backoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          example:
+            estado_http: 500
+            codigo_error: ERROR_INTERNO
+            mensaje: Error inesperado registrando el pago
+            reintentable: true
+            id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+            fecha_hora: '2026-10-07T23:15:00Z'
+    BadGateway:
+      description: |
+        Error de integración entre API Gateway y la Lambda
+        (body `{"message":"Internal server error"}`). **Reintentar** con backoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+    NoDisponible:
+      description: |
+        ERP temporalmente no disponible (por ejemplo, cierre diario). El pago **no**
+        quedó registrado. **Reintentar** respetando `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+          example:
+            estado_http: 503
+            codigo_error: SERVICIO_NO_DISPONIBLE
+            mensaje: El ERP está en proceso de cierre diario, intente más tarde
+            reintentable: true
+            id_correlacion: 0a9b8c7d-6e5f-4a3b-2c1d-000000000001
+            fecha_hora: '2026-10-07T23:15:00Z'
+    GatewayTimeout:
+      description: |
+        API Gateway cortó la petición (body `{"message":"Endpoint request timed out"}`).
+        No se sabe si el pago se registró: **reintentar** (el 409 lo resolverá).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErpError'
+
+  schemas:
+    ErpRegistroPago:
+      type: object
+      description: Solicitud de registro contable de un pago
+      required:
+        - equipo
+        - documento_origen
+        - contribuyente
+        - periodo_fiscal
+        - forma_pago
+        - fecha_pago
+        - total
+        - detalle
+      properties:
+        equipo:
+          $ref: '#/components/schemas/ErpEquipo'
+        documento_origen:
+          $ref: '#/components/schemas/ErpDocumentoOrigen'
+        contribuyente:
+          $ref: '#/components/schemas/ErpContribuyente'
+        periodo_fiscal:
+          $ref: '#/components/schemas/ErpPeriodo'
+        forma_pago:
+          type: string
+          enum: [EFECTIVO, TARJETA, TRANSFERENCIA, CHEQUE]
+        fecha_pago:
+          type: string
+          format: date-time
+          description: Fecha y hora del cobro, ISO-8601 con zona horaria
+          example: '2026-10-01T10:15:00-06:00'
+        total:
+          $ref: '#/components/schemas/ErpMonto'
+        detalle:
+          type: array
+          minItems: 1
+          maxItems: 10
+          description: Desglose por rubro. La suma de `monto` debe ser igual a `total`.
+          items:
+            $ref: '#/components/schemas/ErpLineaDetalle'
+        observaciones:
+          type: string
+          maxLength: 250
+
+    ErpDocumentoOrigen:
+      type: object
+      description: Documento que respalda el pago en el sistema origen (llave de unicidad)
+      required: [tipo, numero, fecha_emision]
+      properties:
+        tipo:
+          type: string
+          enum: [RECIBO_CAJA, BOLETA_DEPOSITO, VOUCHER_TARJETA]
+        numero:
+          type: string
+          minLength: 1
+          maxLength: 40
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: |
+            Número **único y estable** del documento en el sistema origen
+            (por ejemplo `EQA-000123`). Nunca generar uno nuevo por intento.
+          example: EQA-000123
+        fecha_emision:
+          type: string
+          format: date
+          example: '2026-10-01'
+
+    ErpContribuyente:
+      type: object
+      required: [codigo_cliente]
+      properties:
+        codigo_cliente:
+          type: string
+          minLength: 1
+          maxLength: 50
+          example: CLI-0001
+        codigo_contador:
+          type: string
+          maxLength: 50
+          example: MTR-00001
+        nit:
+          type: string
+          maxLength: 20
+          description: NIT o `CF` (consumidor final)
+          example: CF
+
+    ErpPeriodo:
+      type: object
+      required: [anio, mes]
+      properties:
+        anio:
+          type: integer
+          format: int32
+          minimum: 2000
+          maximum: 2100
+          example: 2026
+        mes:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 12
+          example: 9
+
+    ErpLineaDetalle:
+      type: object
+      required: [rubro, monto]
+      properties:
+        rubro:
+          type: string
+          description: Rubro contable del cobro
+          enum: [AGUA_POTABLE, RECONEXION, MORA, NUEVA_CONEXION, OTROS]
+        descripcion:
+          type: string
+          maxLength: 120
+          description: Obligatoria si `rubro = OTROS`
+        monto:
+          $ref: '#/components/schemas/ErpMonto'
+
+    ErpMonto:
+      type: string
+      description: Monto en quetzales como texto con exactamente 2 decimales
+      pattern: '^(0|[1-9][0-9]{0,8})\.[0-9]{2}$'
+      example: '150.75'
+
+    ErpEquipo:
+      type: string
+      description: Equipo que envía el pago. Debe coincidir con la API key.
+      enum: [EQUIPO_A, EQUIPO_B, EQUIPO_C, EQUIPO_D]
+
+    ErpComprobante:
+      type: object
+      description: Comprobante emitido por el ERP al contabilizar el pago
+      required:
+        - numero_comprobante
+        - numero_documento_origen
+        - equipo
+        - estado
+        - total
+        - fecha_registro
+        - periodo_contable
+        - numero_partida
+      properties:
+        numero_comprobante:
+          type: string
+          pattern: '^ERP-[0-9]{8}-[A-Z0-9]{6}$'
+          description: Comprobante del ERP. Guardarlo en el sistema origen.
+          example: ERP-20261007-Q7W2ZX
+        numero_documento_origen:
+          type: string
+          example: EQA-000123
+        equipo:
+          $ref: '#/components/schemas/ErpEquipo'
+        estado:
+          type: string
+          enum: [CONTABILIZADO]
+        total:
+          $ref: '#/components/schemas/ErpMonto'
+        fecha_registro:
+          type: string
+          format: date-time
+          description: Momento (UTC) en que el ERP registró el pago
+        periodo_contable:
+          $ref: '#/components/schemas/ErpPeriodo'
+        numero_partida:
+          type: string
+          description: Número de partida contable generada
+          example: PDA-2026-000873
+
+    ErpError:
+      type: object
+      description: Formato de error del ERP (excepto errores propios de API Gateway)
+      required: [estado_http, codigo_error, mensaje, reintentable, fecha_hora]
+      properties:
+        estado_http:
+          type: integer
+          example: 503
+        codigo_error:
+          type: string
+          description: |
+            Código estable para decidir qué hacer (no parsear `mensaje`). Valores:
+            `VALIDACION`, `EQUIPO_NO_COINCIDE`, `DOCUMENTO_NO_ENCONTRADO`,
+            `DOCUMENTO_DUPLICADO`, `DOCUMENTO_REUTILIZADO`, `PERIODO_CERRADO`,
+            `PERIODO_FUTURO`, `TOTAL_NO_CUADRA`, `DESCRIPCION_REQUERIDA`,
+            `LIMITE_SOLICITUDES`, `ERROR_INTERNO`, `SERVICIO_NO_DISPONIBLE`.
+          example: SERVICIO_NO_DISPONIBLE
+        mensaje:
+          type: string
+          description: Mensaje para humanos (puede cambiar, no usar en lógica)
+        reintentable:
+          type: boolean
+          description: Pista del simulador; la decisión final se basa en el código HTTP
+        id_correlacion:
+          type: string
+        fecha_hora:
+          type: string
+          format: date-time
+        errores:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErpErrorCampo'
+        comprobante_original:
+          $ref: '#/components/schemas/ErpComprobante'
+
+    ErpErrorCampo:
+      type: object
+      required: [campo, mensaje]
+      properties:
+        campo:
+          type: string
+          example: total
+        mensaje:
+          type: string
+
+    ErpSalud:
+      type: object
+      required: [estado, destino, fecha_hora]
+      properties:
+        estado:
+          type: string
+          enum: [ARRIBA]
+        destino:
+          type: string
+          example: ERP
+        version:
+          type: string
+          example: 1.0.0
+        fecha_hora:
+          type: string
+          format: date-time

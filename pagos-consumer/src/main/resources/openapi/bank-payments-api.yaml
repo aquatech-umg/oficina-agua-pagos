@@ -1,0 +1,605 @@
+# =============================================================================
+# Banco Simulado — Contrato OpenAPI (Feature 3: envío de pagos vía colas)
+# -----------------------------------------------------------------------------
+# Este archivo es el CONTRATO que entrega el docente. Los equipos NO lo modifican:
+# lo copian a su proyecto (src/main/resources/openapi/) y generan con él un
+# cliente Feign usando openapi-generator-maven-plugin (library = spring-cloud).
+#
+# A propósito, el banco y el ERP NO piden el mismo formato. Diferencias del banco:
+#   - La unicidad del pago va en el HEADER `Idempotency-Key`, no en el body.
+#   - El monto va en CENTAVOS (entero): Q150.75 -> 15075.
+#   - Nombres en inglés, camelCase.
+#
+# El simulador inyecta RETARDOS y FALLOS transitorios a propósito para que el
+# consumidor implemente reintento + dead-letter.
+# =============================================================================
+openapi: 3.0.3
+
+info:
+  # Título en ASCII simple: openapi-generator lo usa para nombrar la propiedad
+  # de la API key (bankpaymentssimulator.security.apiKeyAuth.key).
+  title: Bank Payments Simulator API
+  version: 1.0.0
+  description: |
+    Simulador del **banco** que recibe la notificación de los pagos cobrados por la
+    Oficina del Agua. Corre en AWS (API Gateway + Lambda + DynamoDB) y es el mismo
+    para los 4 equipos.
+
+    **Reglas clave del contrato**
+
+    1. **Idempotencia por header:** cada pago se envía con `Idempotency-Key`. La llave
+       debe ser **estable** (derivada del pago del monolito, por ejemplo `EQA-000123`):
+       todos los reintentos del mismo pago usan la misma llave.
+    2. **Reenvío del mismo pago** (misma llave, mismos datos) → `409` con
+       `code = DUPLICATE_PAYMENT` y el comprobante original en `originalReceipt`.
+       Para el consumidor eso significa **"ya estaba entregado"**.
+    3. **Misma llave con datos distintos** → `409` con `code = IDEMPOTENCY_KEY_REUSED`.
+       Es un error del productor: dead-letter, no se reintenta.
+    4. **Fallos transitorios a propósito:** `429`, `500`, `502`, `503`, `504` y
+       timeouts del lado del cliente. Se **reintentan** con backoff.
+    5. **Rechazos de negocio** (`422`) y validación (`400`) **no** se reintentan.
+
+    **Montos en centavos:** `amount.valueInCents` es un entero. Q150.75 se envía como
+    `15075`. Nunca usar `double` para convertir.
+
+    **Autenticación:** header `x-api-key` con la llave entregada a cada equipo.
+    La llave identifica al equipo; el `teamCode` del body debe coincidir.
+
+    **Timeouts recomendados en el cliente:** connect 2 s, read 3 s.
+  contact:
+    name: Docente — Desarrollo Web UMG
+    email: wcordovz1@umg.edu.gt
+
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
+    description: Simulador desplegado por el docente en AWS
+    variables:
+      apiId:
+        default: REEMPLAZAR_API_ID
+        description: Id del API Gateway (lo comparte el docente)
+      region:
+        default: us-east-1
+      stage:
+        default: prod
+  - url: http://localhost:3000
+    description: Ejecución local con `sam local start-api` (opcional)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: BankPayments
+    description: Notificación y consulta de pagos en el banco simulado
+  - name: BankHealth
+    description: Verificación de disponibilidad (sin API key)
+
+paths:
+  /bank/v1/payments:
+    post:
+      tags: [BankPayments]
+      operationId: sendBankPayment
+      summary: Notifica al banco un pago cobrado por la Oficina del Agua
+      description: |
+        Registra el pago en el banco. La operación es **idempotente por
+        `Idempotency-Key`**: el banco nunca registra dos veces el mismo pago.
+
+        Puede tardar más de lo normal o fallar de forma transitoria a propósito
+        (simulación). El cliente debe tener timeout y reintentar solo los casos
+        marcados como reintentables.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/SimulationScenario'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankPaymentRequest'
+            examples:
+              pagoServicio:
+                summary: Pago de Q150.75 en efectivo (Idempotency-Key = EQA-000123)
+                value:
+                  teamCode: EQUIPO_A
+                  payer:
+                    customerCode: CLI-0001
+                    fullName: Ana López
+                    taxId: CF
+                  amount:
+                    valueInCents: 15075
+                    currency: GTQ
+                  transactionDate: '2026-10-01T16:15:00Z'
+                  channel: CASH
+                  description: Servicio de agua 2026-09
+                  metadata:
+                    sourceSystem: laravel-oficina-agua
+      responses:
+        '201':
+          description: Pago registrado en el banco. **No reintentar.**
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankPaymentReceipt'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/BusinessRejection'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /bank/v1/payments/{idempotencyKey}:
+    get:
+      tags: [BankPayments]
+      operationId: getBankPayment
+      summary: Consulta si un pago ya fue registrado en el banco
+      description: |
+        Útil para **reconciliar** después de un timeout: si el cliente no recibió
+        respuesta, puede preguntar si el banco sí alcanzó a registrar el pago.
+        Solo devuelve pagos del equipo dueño de la API key.
+      parameters:
+        - name: idempotencyKey
+          in: path
+          required: true
+          description: La misma `Idempotency-Key` usada en el POST
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 64
+            pattern: '^[A-Za-z0-9_-]+$'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: El pago existe en el banco
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankPaymentReceipt'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /bank/v1/health:
+    get:
+      tags: [BankHealth]
+      operationId: getBankHealth
+      summary: Estado del simulador (no requiere API key)
+      security: []
+      responses:
+        '200':
+          description: El simulador está disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      # API Gateway (REST) exige exactamente este nombre de header.
+      name: x-api-key
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Identificador **estable** del pago en el sistema origen. Es la llave de
+        unicidad del banco. Recomendado: prefijo del equipo + id del pago en el
+        monolito (`EQA-000123`). Nunca un UUID nuevo por intento.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+        pattern: '^[A-Za-z0-9_-]+$'
+      example: EQA-000123
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: |
+        Id para trazar una petición entre servicios (productor → cola → consumidor →
+        banco). Si no se envía, el simulador genera uno y lo devuelve.
+      schema:
+        type: string
+        maxLength: 64
+    SimulationScenario:
+      name: X-Simulation-Scenario
+      in: header
+      required: false
+      description: |
+        **Solo para pruebas.** Fuerza un escenario en vez del comportamiento
+        aleatorio. El docente puede deshabilitarlo (por ejemplo el día de la demo);
+        en ese caso se ignora y se usa `AUTO`.
+
+        | Valor | Qué simula |
+        |---|---|
+        | `AUTO` | Comportamiento aleatorio configurado (default) |
+        | `SUCCESS` | Sin fallos ni retardos extra |
+        | `SLOW` | Responde bien pero tarda 1.5–2.5 s (dentro del timeout) |
+        | `TIMEOUT` | Tarda 4–8 s **sin registrar** el pago (el cliente debe cortar) |
+        | `LOST_ACK` | **Registra** el pago y luego tarda 4–8 s (el reintento verá 409) |
+        | `ERROR_500` | Error interno sin registrar el pago |
+        | `ERROR_503` | Servicio no disponible, con `Retry-After` |
+        | `RATE_LIMIT` | `429` simulado, con `Retry-After` |
+      schema:
+        type: string
+        enum: [AUTO, SUCCESS, SLOW, TIMEOUT, LOST_ACK, ERROR_500, ERROR_503, RATE_LIMIT]
+        default: AUTO
+
+  headers:
+    CorrelationId:
+      description: Id de correlación (el recibido o uno generado por el simulador)
+      schema:
+        type: string
+    RetryAfter:
+      description: Segundos que el cliente debería esperar antes de reintentar
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    ValidationError:
+      description: |
+        El request no cumple el contrato (campo o header faltante, formato inválido).
+        **No reintentar** → corregir el mapeo / dead-letter.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          example:
+            status: 400
+            code: VALIDATION_ERROR
+            message: El request no cumple el contrato
+            retryable: false
+            correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+            timestamp: '2026-10-07T23:15:00Z'
+            details:
+              - field: amount.valueInCents
+                message: debe ser un entero mayor que 0
+              - field: Idempotency-Key
+                message: es obligatorio
+    Forbidden:
+      description: |
+        API key ausente o inválida (respuesta de API Gateway: `{"message":"Forbidden"}`),
+        o el `teamCode` del body no corresponde a la API key (`code = TEAM_MISMATCH`).
+        **No reintentar** → revisar configuración.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+    NotFound:
+      description: No hay pago con esa llave para este equipo. **No reintentar.**
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          example:
+            status: 404
+            code: PAYMENT_NOT_FOUND
+            message: No existe un pago con esa Idempotency-Key para el equipo
+            retryable: false
+            correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+            timestamp: '2026-10-07T23:15:00Z'
+    Conflict:
+      description: |
+        Ya existe un pago con esa `Idempotency-Key`. **No reintentar.**
+
+        - `DUPLICATE_PAYMENT`: mismos datos → tratar como **entregado** (ack).
+          Incluye `originalReceipt`.
+        - `IDEMPOTENCY_KEY_REUSED`: datos distintos → error del productor, dead-letter.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          examples:
+            duplicado:
+              summary: Reenvío del mismo pago (por ejemplo, después de un timeout)
+              value:
+                status: 409
+                code: DUPLICATE_PAYMENT
+                message: El pago con Idempotency-Key EQA-000123 ya fue registrado
+                retryable: false
+                correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+                timestamp: '2026-10-07T23:15:05Z'
+                originalReceipt:
+                  receiptId: BNK-20261007-8F3K2Q
+                  idempotencyKey: EQA-000123
+                  teamCode: EQUIPO_A
+                  status: ACCEPTED
+                  amount:
+                    valueInCents: 15075
+                    currency: GTQ
+                  receivedAt: '2026-10-07T23:14:58Z'
+                  valueDate: '2026-10-08'
+            llaveReutilizada:
+              summary: Misma Idempotency-Key con otro monto
+              value:
+                status: 409
+                code: IDEMPOTENCY_KEY_REUSED
+                message: La Idempotency-Key EQA-000123 ya se usó con datos diferentes
+                retryable: false
+                correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+                timestamp: '2026-10-07T23:16:00Z'
+    BusinessRejection:
+      description: |
+        El banco rechaza el pago por una regla de negocio. **No reintentar.**
+
+        | `code` | Causa |
+        |---|---|
+        | `AMOUNT_LIMIT_EXCEEDED` | `valueInCents` mayor a 2,500,000 (Q25,000.00) |
+        | `PAYMENT_DATE_IN_FUTURE` | `transactionDate` más de 5 minutos en el futuro |
+        | `UNSUPPORTED_CHANNEL` | `channel = CHECK` (el banco no recibe cheques por este canal) |
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          example:
+            status: 422
+            code: AMOUNT_LIMIT_EXCEEDED
+            message: El monto excede el límite de Q25,000.00 por pago
+            retryable: false
+            correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+            timestamp: '2026-10-07T23:15:00Z'
+    TooManyRequests:
+      description: |
+        Límite de peticiones excedido. **Reintentar** respetando `Retry-After`
+        (si viene) o con backoff exponencial. Si lo genera API Gateway el body es
+        `{"message":"Too Many Requests"}` y no trae `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+    InternalError:
+      description: |
+        Error interno del simulador. El pago **no** quedó registrado.
+        **Reintentar** con backoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          example:
+            status: 500
+            code: INTERNAL_ERROR
+            message: Error inesperado procesando el pago
+            retryable: true
+            correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+            timestamp: '2026-10-07T23:15:00Z'
+    BadGateway:
+      description: |
+        Error de integración entre API Gateway y la Lambda
+        (body `{"message":"Internal server error"}`). **Reintentar** con backoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+    ServiceUnavailable:
+      description: |
+        Banco temporalmente no disponible. El pago **no** quedó registrado.
+        **Reintentar** respetando `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+          example:
+            status: 503
+            code: SERVICE_UNAVAILABLE
+            message: El banco no está disponible en este momento
+            retryable: true
+            correlationId: 7f1c2a9e-1b2c-4d3e-9f00-112233445566
+            timestamp: '2026-10-07T23:15:00Z'
+    GatewayTimeout:
+      description: |
+        API Gateway cortó la petición (body `{"message":"Endpoint request timed out"}`).
+        No se sabe si el pago se registró: **reintentar** (el 409 lo resolverá).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BankError'
+
+  schemas:
+    BankPaymentRequest:
+      type: object
+      description: |
+        Notificación de un pago al banco. La llave de unicidad NO está aquí: va en el
+        header `Idempotency-Key`.
+      required: [teamCode, payer, amount, transactionDate, channel]
+      properties:
+        teamCode:
+          $ref: '#/components/schemas/TeamCode'
+        payer:
+          $ref: '#/components/schemas/Payer'
+        amount:
+          $ref: '#/components/schemas/Money'
+        transactionDate:
+          type: string
+          format: date-time
+          description: Fecha y hora del cobro, ISO-8601 con zona horaria
+          example: '2026-10-01T16:15:00Z'
+        channel:
+          type: string
+          description: Canal por el que se cobró el pago
+          enum: [CASH, CARD, BANK_TRANSFER, CHECK]
+        description:
+          type: string
+          maxLength: 140
+          description: Texto libre que verá el banco (concepto del pago)
+          example: Servicio de agua 2026-09
+        metadata:
+          type: object
+          maxProperties: 10
+          description: |
+            Datos extra propios de cada equipo (texto). No participan en la
+            detección de duplicados. **No** incluir contraseñas ni tokens.
+          additionalProperties:
+            type: string
+            maxLength: 200
+
+    Payer:
+      type: object
+      description: Quien realizó el pago (datos mínimos)
+      required: [customerCode]
+      properties:
+        customerCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Código del cliente en el monolito
+          example: CLI-0001
+        fullName:
+          type: string
+          maxLength: 150
+          example: Ana López
+        taxId:
+          type: string
+          maxLength: 20
+          description: NIT o `CF` (consumidor final)
+          example: CF
+
+    Money:
+      type: object
+      description: Monto en la unidad mínima de la moneda (centavos)
+      required: [valueInCents, currency]
+      properties:
+        valueInCents:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 99999999
+          description: Q150.75 → 15075
+          example: 15075
+        currency:
+          type: string
+          description: ISO-4217. El simulador solo acepta quetzales.
+          enum: [GTQ]
+
+    TeamCode:
+      type: string
+      description: Equipo que envía el pago. Debe coincidir con la API key.
+      enum: [EQUIPO_A, EQUIPO_B, EQUIPO_C, EQUIPO_D]
+
+    BankPaymentReceipt:
+      type: object
+      description: Comprobante emitido por el banco al registrar el pago
+      required: [receiptId, idempotencyKey, teamCode, status, amount, receivedAt, valueDate]
+      properties:
+        receiptId:
+          type: string
+          pattern: '^BNK-[0-9]{8}-[A-Z0-9]{6}$'
+          description: Comprobante del banco. Guardarlo en el sistema origen.
+          example: BNK-20261007-8F3K2Q
+        idempotencyKey:
+          type: string
+          example: EQA-000123
+        teamCode:
+          $ref: '#/components/schemas/TeamCode'
+        status:
+          type: string
+          enum: [ACCEPTED]
+        amount:
+          $ref: '#/components/schemas/Money'
+        receivedAt:
+          type: string
+          format: date-time
+          description: Momento (UTC) en que el banco registró el pago
+        valueDate:
+          type: string
+          format: date
+          description: Fecha en que el banco acredita el monto (siguiente día hábil)
+
+    BankError:
+      type: object
+      description: Formato de error del banco (excepto errores propios de API Gateway)
+      required: [status, code, message, retryable, timestamp]
+      properties:
+        status:
+          type: integer
+          description: Mismo valor que el código HTTP
+          example: 503
+        code:
+          type: string
+          description: |
+            Código estable para decidir qué hacer (no parsear `message`). Valores:
+            `VALIDATION_ERROR`, `TEAM_MISMATCH`, `PAYMENT_NOT_FOUND`,
+            `DUPLICATE_PAYMENT`, `IDEMPOTENCY_KEY_REUSED`, `AMOUNT_LIMIT_EXCEEDED`,
+            `PAYMENT_DATE_IN_FUTURE`, `UNSUPPORTED_CHANNEL`, `RATE_LIMITED`,
+            `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE`.
+          example: SERVICE_UNAVAILABLE
+        message:
+          type: string
+          description: Mensaje para humanos (puede cambiar, no usar en lógica)
+        retryable:
+          type: boolean
+          description: Pista del simulador; la decisión final se basa en el código HTTP
+        correlationId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankFieldError'
+        originalReceipt:
+          $ref: '#/components/schemas/BankPaymentReceipt'
+
+    BankFieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          example: amount.valueInCents
+        message:
+          type: string
+          example: debe ser un entero mayor que 0
+
+    HealthStatus:
+      type: object
+      required: [status, destination, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [UP]
+        destination:
+          type: string
+          example: BANK
+        version:
+          type: string
+          example: 1.0.0
+        timestamp:
+          type: string
+          format: date-time
