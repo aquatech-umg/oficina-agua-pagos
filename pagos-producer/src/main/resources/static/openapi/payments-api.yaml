@@ -1,0 +1,255 @@
+# Contract-first: este archivo se escribe ANTES del codigo Java.
+# Es el contrato del servicio propio de pagos del equipo. El banco y el ERP NO se definen
+# aqui: traen su propio spec entregado por el docente (ver pagos-consumer/.../openapi/).
+# Version inicial (solo estructura); se itera despues.
+openapi: 3.0.3
+info:
+  title: Payments API - Oficina del Agua
+  description: |
+    Servicio que envia los pagos registrados en el monolito (sin modificarlo) a dos sistemas
+    externos: el banco y el ERP municipal. El producer toma los pagos pendientes y los publica
+    en la cola; el consumer los entrega a cada destino y deja constancia del resultado.
+    Cada pago tiene un estado de envio independiente por destino.
+    Esta API permite disparar el envio, consultar el estado y reintentar los fallidos.
+  version: 0.2.0
+servers:
+  - url: http://localhost:8083
+    description: Local
+tags:
+  - name: Payments
+    description: Envio de pagos a sistemas externos
+
+paths:
+  /api/v1/payments/dispatch:
+    post:
+      tags: [Payments]
+      operationId: dispatchPendingPayments
+      summary: Encola los pagos pendientes para enviarlos al banco y al ERP
+      description: |
+        Busca los pagos que aun no fueron enviados y los publica en la cola.
+        Un pago que ya esta en cola o ya fue entregado se omite, asi nunca se envia dos veces.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispatchRequest'
+      responses:
+        '202':
+          description: Pagos aceptados para envio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/payments/transmissions:
+    get:
+      tags: [Payments]
+      operationId: listTransmissions
+      summary: Lista el estado de envio de los pagos
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Si se envia, devuelve los pagos que tengan ese estado en algun destino
+          schema:
+            $ref: '#/components/schemas/TransmissionStatus'
+        - name: destination
+          in: query
+          required: false
+          description: Limita el filtro de status a un solo destino
+          schema:
+            $ref: '#/components/schemas/Destination'
+      responses:
+        '200':
+          description: Lista de transmisiones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Transmission'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/payments/transmissions/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      tags: [Payments]
+      operationId: getTransmission
+      summary: Obtiene el estado de envio de un pago en ambos destinos
+      responses:
+        '200':
+          description: Transmision encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transmission'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments/transmissions/{paymentId}/retry:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: retryTransmission
+      summary: Vuelve a encolar un pago cuyo envio fallo
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryRequest'
+      responses:
+        '202':
+          description: Reintento aceptado, el pago vuelve a la cola
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transmission'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+components:
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      description: Id del pago en el monolito
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
+  schemas:
+    DispatchRequest:
+      type: object
+      description: Opciones para el envio de pagos pendientes
+      properties:
+        limit:
+          type: integer
+          description: Maximo de pagos a encolar en esta corrida
+          minimum: 1
+          maximum: 500
+          default: 100
+          example: 50
+
+    DispatchResult:
+      type: object
+      description: Resumen de lo que hizo la corrida
+      required: [queued, skipped]
+      properties:
+        queued:
+          type: integer
+          description: Pagos publicados en la cola
+          example: 12
+        skipped:
+          type: integer
+          description: Pagos omitidos porque ya estaban en cola o ya fueron entregados
+          example: 3
+
+    RetryRequest:
+      type: object
+      description: A que destino se reintenta el envio
+      properties:
+        destination:
+          type: string
+          description: BANK, ERP o BOTH. Si se omite, se reintentan los destinos que esten en FAILED.
+          enum: [BANK, ERP, BOTH]
+          default: BOTH
+
+    Destination:
+      type: string
+      description: Sistema externo al que se entrega el pago
+      enum: [BANK, ERP]
+
+    TransmissionStatus:
+      type: string
+      description: |
+        PENDING (aun no se encola), QUEUED (en la cola), SENT (el destino lo recibio o ya lo
+        tenia registrado), FAILED (rechazo definitivo o se agotaron los reintentos).
+      enum: [PENDING, QUEUED, SENT, FAILED]
+
+    DestinationStatus:
+      type: object
+      description: Estado de envio de un pago hacia un destino
+      required: [status, attempts]
+      properties:
+        status:
+          $ref: '#/components/schemas/TransmissionStatus'
+        attempts:
+          type: integer
+          minimum: 0
+          example: 2
+        lastError:
+          type: string
+          description: Codigo del ultimo error del destino, si lo hubo
+          example: SERVICE_UNAVAILABLE
+        lastAttemptAt:
+          type: string
+          format: date-time
+        externalReference:
+          type: string
+          description: Comprobante que devolvio el destino (receiptId del banco o numero_comprobante del ERP)
+          example: BNK-20261007-8F3K2Q
+
+    Transmission:
+      type: object
+      description: Estado de envio de un pago a cada destino
+      required: [paymentId, idempotencyKey, bank, erp]
+      properties:
+        paymentId:
+          type: integer
+          format: int64
+          description: Id del pago en el monolito
+          example: 1042
+        idempotencyKey:
+          type: string
+          description: Llave estable derivada del pago (prefijo del equipo + id); es la misma en todos los reintentos y en ambos destinos
+          example: EQA-001042
+        bank:
+          $ref: '#/components/schemas/DestinationStatus'
+        erp:
+          $ref: '#/components/schemas/DestinationStatus'
+
+    Error:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: integer
+          example: 404
+        message:
+          type: string
+          example: Payment 1042 not found
+        details:
+          type: array
+          items:
+            type: string
+
+  responses:
+    BadRequest:
+      description: Datos invalidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Conflicto (por ejemplo, reintentar un pago que no tiene ningun destino en estado FAILED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
