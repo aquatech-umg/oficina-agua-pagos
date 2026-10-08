@@ -7,7 +7,7 @@ services:
       - "15672:15672" 
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-1234}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
