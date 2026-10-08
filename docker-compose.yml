@@ -1,0 +1,20 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: pagos-rabbitmq
+    ports:
+      - "5672:5672"  
+      - "15672:15672" 
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-1234}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  rabbitmq-data:
