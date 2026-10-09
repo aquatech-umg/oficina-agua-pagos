@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: pagos-producer
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:admin}
+    password: ${RABBITMQ_PASSWORD:changeme}
+
+server:
+  port: 8083

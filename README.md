@@ -7,7 +7,7 @@ El monolito Laravel no se modifica. Este repo contiene servicios independientes 
 ## Requisitos
 
 - JDK 21 (`java -version` debe mostrar 21)
-- Maven 3.9+
+- Maven 3.9+ (opcional: cada servicio trae su Maven Wrapper)
 - Docker Desktop
 
 ## Convenciones (mismas del repo `oficina-agua-rag`)
@@ -21,23 +21,61 @@ El monolito Laravel no se modifica. Este repo contiene servicios independientes 
 
 ```
 oficina-agua-pagos/
-├── docker-compose.yml        RabbitMQ (y lo que se agregue después)
-├── .env.example              Credenciales de ejemplo, copiar a .env
-├── pagos-producer/           Servicio productor (Spring Boot)
-│   └── src/main/resources/static/openapi/payments-api.yaml   Contrato OpenAPI
-└── pagos-consumer/           Servicio consumidor (Spring Boot, AQ-97)
-    └── src/main/resources/openapi/   bank-payments-api.yaml y erp-payments-api.yaml (del docente, sin modificar)
+├── README.md
+├── docker-compose.yml          RabbitMQ
+├── .env.example                Variables de ejemplo (copiar a .env)
+├── pagos-producer/             Spring Boot: toma pagos pendientes y los publica en la cola
+│   ├── pom.xml
+│   ├── mvnw, mvnw.cmd, .mvn/   Maven Wrapper (no hace falta instalar Maven)
+│   └── src/
+│       ├── main/java/gt/edu/umg/aquatech/pagosproducer/
+│       │   ├── PagosProducerApplication.java
+│       │   └── SaludController.java
+│       ├── main/resources/
+│       │   ├── application.yaml
+│       │   └── openapi/payments-api.yaml      Contrato propio (contract-first)
+│       └── test/java/gt/edu/umg/aquatech/pagosproducer/
+└── pagos-consumer/             Spring Boot: toma pagos de la cola y los entrega al banco y al ERP
+    ├── pom.xml
+    ├── mvnw, mvnw.cmd, .mvn/
+    └── src/
+        ├── main/java/gt/edu/umg/aquatech/pagosconsumer/
+        ├── main/resources/
+        │   ├── application.yaml
+        │   └── openapi/bank-payments-api.yaml, erp-payments-api.yaml   (del docente, sin modificar)
+        └── test/java/gt/edu/umg/aquatech/pagosconsumer/
 ```
 
-## Flujo
+Misma plantilla que `oficina-agua-rag/rag-service`: Spring Boot 4.1.1, Java 21, springdoc 3.0.2 y `openapi-generator-maven-plugin` 7.21.0.
+
+## Cómo correr los servicios
+
+Con RabbitMQ arriba (`docker compose up -d`), desde la carpeta de cada servicio:
+
+```bash
+./mvnw spring-boot:run          # en Windows: mvnw.cmd spring-boot:run
+```
+
+| Servicio | Puerto | Comprobación |
+|---|---|---|
+| pagos-producer | 8083 | http://localhost:8083/api/salud |
+| pagos-consumer | 8084 | http://localhost:8084/api/salud |
+
+`/api/salud` abre una conexión real contra RabbitMQ y devuelve su versión; si RabbitMQ está apagado, falla. Las credenciales se toman de `RABBITMQ_USER` y `RABBITMQ_PASSWORD` (por defecto `admin` / `changeme`, igual que el compose).
+
+El contrato del producer genera interfaces Java al compilar (`./mvnw clean compile`); quedan en `target/generated-sources/openapi`.
+
+## Flujo 
 
 1. El **producer** consulta los pagos pendientes en el MySQL del monolito (por medio de un flag) y los publica en la **cola**.
 2. El **consumer** toma cada pago de la cola y lo entrega a **dos destinos**: el **banco** y el **ERP municipal**.
 3. Cada destino devuelve un comprobante; el resultado (exitoso o fallido) se registra y los pagos exitosos actualizan el flag para que no se vuelvan a enviar.
 
-## Destinos externos (specs del docente)
+Pendiente de definir (AQ-98): dónde vive exactamente el flag sin modificar el esquema del monolito, y cómo se lleva el estado por destino.
 
-Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el docente los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
+## Destinos externos (specs del Ingeniero)
+
+Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el ingeniero los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
 
 El banco y el ERP no piden el mismo formato a propósito:
 
@@ -92,14 +130,6 @@ docker compose ps
 Interfaz de administración: http://localhost:15672
 
 Para probar que un mensaje viaja: crea una cola `cola-prueba` en la pestaña **Queues and Streams**, publica un mensaje desde **Publish message** y léelo con **Get messages**.
-
-## Puertos
-
-| Servicio | Puerto |
-|---|---|
-| pagos-producer | 8083 |
-| RabbitMQ (AMQP) | 5672 |
-| RabbitMQ (web) | 15672 |
 
 ## Flujo de trabajo
 
