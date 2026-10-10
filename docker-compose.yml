@@ -3,8 +3,8 @@ services:
     image: rabbitmq:4-management
     container_name: pagos-rabbitmq
     ports:
-      - "5672:5672"   
-      - "15672:15672"
+      - "5672:5672"   # AMQP: por aqui se conectan el productor y el consumidor
+      - "15672:15672" # Interfaz web de administracion: http://localhost:15672
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
@@ -16,5 +16,82 @@ services:
       timeout: 5s
       retries: 5
 
+  # Control y logs de los pagos (AQ-98). Mismo patron que dynamodb-chat (8010) y la replicacion (8011).
+  dynamodb-pagos:
+    image: amazon/dynamodb-local:latest
+    container_name: dynamodb-pagos
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath ./data"
+    working_dir: /home/dynamodblocal
+    user: root
+    ports:
+      - "8012:8000"   # 8000 lo usa el monolito Laravel
+    volumes:
+      - dynamodb-pagos-data:/home/dynamodblocal/data
+
+  # Crea las tablas la primera vez; si ya existen, no hace nada.
+  dynamodb-pagos-init:
+    image: amazon/aws-cli:latest
+    container_name: dynamodb-pagos-init
+    depends_on:
+      - dynamodb-pagos
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        until aws dynamodb list-tables \
+          --endpoint-url http://dynamodb-pagos:8000 \
+          >/dev/null 2>&1
+        do
+          echo "Esperando DynamoDB Local..."
+          sleep 2
+        done
+
+        if aws dynamodb describe-table \
+          --table-name pagos-control \
+          --endpoint-url http://dynamodb-pagos:8000 \
+          >/dev/null 2>&1
+        then
+          echo "La tabla pagos-control ya existe."
+        else
+          aws dynamodb create-table \
+            --table-name pagos-control \
+            --attribute-definitions \
+              AttributeName=pagoDestino,AttributeType=S \
+              AttributeName=estado,AttributeType=S \
+              AttributeName=actualizadoEn,AttributeType=S \
+            --key-schema AttributeName=pagoDestino,KeyType=HASH \
+            --global-secondary-indexes \
+              'IndexName=estado-actualizadoEn-index,KeySchema=[{AttributeName=estado,KeyType=HASH},{AttributeName=actualizadoEn,KeyType=RANGE}],Projection={ProjectionType=ALL}' \
+            --billing-mode PAY_PER_REQUEST \
+            --endpoint-url http://dynamodb-pagos:8000
+          echo "Tabla pagos-control creada."
+        fi
+
+        if aws dynamodb describe-table \
+          --table-name pagos-logs \
+          --endpoint-url http://dynamodb-pagos:8000 \
+          >/dev/null 2>&1
+        then
+          echo "La tabla pagos-logs ya existe."
+        else
+          aws dynamodb create-table \
+            --table-name pagos-logs \
+            --attribute-definitions \
+              AttributeName=pagoDestino,AttributeType=S \
+              AttributeName=intento,AttributeType=N \
+            --key-schema \
+              AttributeName=pagoDestino,KeyType=HASH \
+              AttributeName=intento,KeyType=RANGE \
+            --billing-mode PAY_PER_REQUEST \
+            --endpoint-url http://dynamodb-pagos:8000
+          echo "Tabla pagos-logs creada."
+        fi
+
 volumes:
   rabbitmq-data:
+  dynamodb-pagos-data:

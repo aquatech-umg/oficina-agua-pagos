@@ -2,7 +2,7 @@
 
 Feature 3 de la Fase 2 de Oficina del Agua: envío de pagos a sistemas externos (banco/ERP) mediante RabbitMQ, con reintento de los fallidos y sin duplicar pagos.
 
-El monolito Laravel no se modifica. Este repo contiene servicios independientes que leen los pagos del monolito y llevan su propio control de lo transmitido.
+El monolito Laravel no se modifica. Este repo contiene servicios independientes que **leen** los pagos desde la réplica de solo lectura (`oficina-agua-infra`) y llevan su propio control de lo transmitido en DynamoDB.
 
 ## Requisitos
 
@@ -22,8 +22,11 @@ El monolito Laravel no se modifica. Este repo contiene servicios independientes 
 ```
 oficina-agua-pagos/
 ├── README.md
-├── docker-compose.yml          RabbitMQ
+├── docker-compose.yml          RabbitMQ y DynamoDB Local (control y logs de pagos)
 ├── .env.example                Variables de ejemplo (copiar a .env)
+├── docs/
+│   ├── diseno-control-pagos.md  Diseño del control de pagos (AQ-98)
+│   └── feign-clientes.md        Cómo consumir el banco y el ERP con Feign
 ├── pagos-producer/             Spring Boot: toma pagos pendientes y los publica en la cola
 │   ├── pom.xml
 │   ├── mvnw, mvnw.cmd, .mvn/   Maven Wrapper (no hace falta instalar Maven)
@@ -60,22 +63,24 @@ Con RabbitMQ arriba (`docker compose up -d`), desde la carpeta de cada servicio:
 |---|---|---|
 | pagos-producer | 8083 | http://localhost:8083/api/salud |
 | pagos-consumer | 8084 | http://localhost:8084/api/salud |
+| RabbitMQ (AMQP / web) | 5672 / 15672 | http://localhost:15672 |
+| DynamoDB Local (pagos) | 8012 | `aws dynamodb list-tables --endpoint-url http://localhost:8012` |
 
 `/api/salud` abre una conexión real contra RabbitMQ y devuelve su versión; si RabbitMQ está apagado, falla. Las credenciales se toman de `RABBITMQ_USER` y `RABBITMQ_PASSWORD` (por defecto `admin` / `changeme`, igual que el compose).
 
 El contrato del producer genera interfaces Java al compilar (`./mvnw clean compile`); quedan en `target/generated-sources/openapi`.
 
-## Flujo 
+## Flujo (según el diagrama del ingeniero)
 
-1. El **producer** consulta los pagos pendientes en el MySQL del monolito (por medio de un flag) y los publica en la **cola**.
+1. El **producer** lee los pagos de la **réplica de solo lectura**, crea el control de cada entrega en DynamoDB (`pagos-control`) y publica un mensaje por destino en la **cola**.
 2. El **consumer** toma cada pago de la cola y lo entrega a **dos destinos**: el **banco** y el **ERP municipal**.
-3. Cada destino devuelve un comprobante; el resultado (exitoso o fallido) se registra y los pagos exitosos actualizan el flag para que no se vuelvan a enviar.
+3. Cada intento (exitoso o fallido) se registra en `pagos-logs`; una función aparte (Lambda en AWS, proceso programado en local) marca el pago como `ENVIADO` para que no se vuelva a enviar.
 
-Pendiente de definir (AQ-98): dónde vive exactamente el flag sin modificar el esquema del monolito, y cómo se lleva el estado por destino.
+Diseño completo en [`docs/diseno-control-pagos.md`](docs/diseno-control-pagos.md). Por confirmar con el docente: dónde vive la bandera (la propuesta la deja en DynamoDB porque la réplica es de solo lectura).
 
-## Destinos externos (specs del Ingeniero)
+## Destinos externos (specs del docente)
 
-Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el ingeniero los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
+Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el docente los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
 
 El banco y el ERP no piden el mismo formato a propósito:
 
