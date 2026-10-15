@@ -9,12 +9,9 @@ Regla del equipo y del docente: las llamadas a los sistemas externos se hacen co
 | 4.1.1 | **2025.1.3** (Oakwood) | 5.0.3 |
 
 - El anuncio de Spring Cloud 2025.1.3 dice que el tren está basado en Boot 4.0.x y es compatible con la línea 4.1.x: https://spring.io/blog/2026/08/20/spring-cloud-2025-1-3-has-been-released/
-- Según Marvin, hace falta la **2025.1.2 o una más nueva**: la 2025.1.1 falla con Boot 4.1. Ese dato sale de su prueba, no del anuncio.
-- Marvin lo probó en `rag-service`, que compila y llama a Ollama. Su documentación está en `oficina-agua-rag`, archivo `rag-service/docs/feign-ollama.md` (PR #13).
 
 ## Qué ya está aplicado en `pagos-consumer`
 
-Es el mismo patrón que compiló Marvin:
 
 | Archivo | Cambio |
 |---|---|
@@ -24,9 +21,6 @@ Es el mismo patrón que compiló Marvin:
 
 Para comprobarlo, desde `pagos-consumer`: `.\mvnw.cmd clean compile` y luego `.\mvnw.cmd spring-boot:run`.
 
-## Pendiente: generar los clientes desde los specs (sin probar)
-
-Marvin escribió su cliente de Ollama a mano. Para el banco y el ERP el docente pide generarlos, y esa configuración **no la probó nadie todavía**. Valida cada paso con `mvnw.cmd clean compile`.
 
 ### 1. Una ejecución del generador por cada spec
 
