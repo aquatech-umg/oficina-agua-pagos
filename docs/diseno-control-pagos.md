@@ -24,7 +24,7 @@ El diagrama del docente dibuja la bandera de "pago enviado" en MySQL. El diagram
 | B. Esquema aparte en MySQL | Escribe en el servidor del monolito | Choca con "nunca escriben"; la réplica no acepta escrituras |
 | **C. DynamoDB** | **No** | **Propuesta.** Cumple todas las reglas y encaja con el diagrama del equipo |
 
-> **Por confirmar con el docente:** dónde vive la bandera. Esta propuesta la pone en DynamoDB (`pagos-control`) en vez de MySQL. Si el docente exige MySQL, haría falta una columna por destino en `pagos` y un cambio de esquema que él debe autorizar; la idempotencia y los reintentos no cambian.
+> **Resuelto:** el docente permite tocar la base, pero el equipo mantiene el control en DynamoDB (`pagos-control`): ya cumple todos los requisitos y no choca con la réplica de solo lectura. Si más adelante se prefiriera una bandera en MySQL, haría falta una columna por destino en `pagos` y un cambio de esquema; la idempotencia y los reintentos no cambian.
 
 ## 3. Colección de control (DynamoDB)
 
@@ -185,9 +185,9 @@ Equivalencias de forma de pago propuestas: `EFECTIVO` → `CASH`, `TARJETA` → 
 
 ## 9. Decisiones abiertas
 
-Las propongo yo y conviene confirmarlas con Marvin o el docente:
+Las propongo yo y conviene confirmarlas con Marvin (la 1 ya está resuelta):
 
-1. **Dónde vive la bandera (por confirmar con el docente, según Jira).** Propuesta: DynamoDB, porque la réplica es de solo lectura y los microservicios no escriben en la base del monolito. El diagrama del docente la dibuja en MySQL.
+1. **Dónde vive la bandera: resuelto.** El docente permite tocar la base, pero se mantiene DynamoDB porque la réplica es de solo lectura y los microservicios no escriben en la base del monolito.
 2. **Pagos con cheque:** el banco responde `422 UNSUPPORTED_CHANNEL` a `CHECK`. ¿Se omite el banco para esos pagos o se dejan en `FALLIDO`?
 3. **Límites del banco:** más de Q25,000.00 por pago o una fecha más de 5 minutos en el futuro dan `422`. Esos pagos terminarían en `FALLIDO`.
 4. **Pagos antiguos:** el ERP rechaza períodos con más de 12 meses (`PERIODO_CERRADO`). Por eso existe el parámetro `:desde`; para la demo, usar datos recientes.
