@@ -76,7 +76,7 @@ El contrato del producer genera interfaces Java al compilar (`./mvnw clean compi
 2. El **consumer** toma cada pago de la cola y lo entrega a **dos destinos**: el **banco** y el **ERP municipal**.
 3. Cada intento (exitoso o fallido) se registra en `pagos-logs`; una función aparte (Lambda en AWS, proceso programado en local) marca el pago como `ENVIADO` para que no se vuelva a enviar.
 
-Diseño completo en [`docs/diseno-control-pagos.md`](docs/diseno-control-pagos.md). Por confirmar con el docente: dónde vive la bandera (la propuesta la deja en DynamoDB porque la réplica es de solo lectura).
+Diseño completo en [`docs/diseno-control-pagos.md`](docs/diseno-control-pagos.md). La bandera de "pago enviado" vive en DynamoDB (`pagos-control`): el docente permite tocar la base, pero el diseño en DynamoDB ya cumple y no choca con la réplica de solo lectura.
 
 ## Destinos externos (specs del docente)
 
