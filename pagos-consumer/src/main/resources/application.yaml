@@ -6,6 +6,14 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:admin}
     password: ${RABBITMQ_PASSWORD:changeme}
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            # Timeouts pedidos por el docente para banco y ERP
+            connect-timeout: 2000
+            read-timeout: 3000
 
 server:
   port: 8084

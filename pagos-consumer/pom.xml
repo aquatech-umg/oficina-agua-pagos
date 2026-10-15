@@ -15,6 +15,8 @@
     <description>Consumidor de pagos: toma los pagos de la cola y los entrega al banco y al ERP</description>
     <properties>
         <java.version>21</java.version>
+        <!-- 2025.1.2 o mas nueva es la que funciona con Spring Boot 4.1.x (AQ-111) -->
+        <spring-cloud.version>2025.1.3</spring-cloud.version>
     </properties>
     <dependencies>
         <dependency>
@@ -34,6 +36,10 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -42,6 +48,18 @@
         </dependency>
     </dependencies>
 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <build>
         <plugins>
             <plugin>
@@ -49,10 +67,10 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
             <!--
-                PENDIENTE (despues del esqueleto): generar los clientes Feign del banco y del ERP
-                con openapi-generator-maven-plugin (library = spring-cloud) a partir de
+                PENDIENTE: generar los clientes Feign del banco y del ERP con
+                openapi-generator-maven-plugin (library = spring-cloud) a partir de
                 src/main/resources/openapi/bank-payments-api.yaml y erp-payments-api.yaml.
-                Antes hay que confirmar que version de Spring Cloud es compatible con Spring Boot 4.1.1.
+                Ver docs/feign-clientes.md. Spring Cloud ya esta confirmado (AQ-111).
             -->
         </plugins>
     </build>
