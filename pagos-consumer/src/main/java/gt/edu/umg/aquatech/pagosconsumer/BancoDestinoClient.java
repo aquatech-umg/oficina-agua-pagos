@@ -1,26 +1,35 @@
 package gt.edu.umg.aquatech.pagosconsumer;
 
+import feign.FeignException;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.banco.api.BankPaymentsApiClient;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.banco.model.BankPaymentReceipt;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.banco.model.BankPaymentRequest;
+import jakarta.validation.ConstraintViolationException;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
- * TODO: conectar con el cliente Feign generado desde bank-payments-api.yaml
- * (paquete gt.edu.umg.aquatech.pagosconsumer.cliente.banco.api). Esqueleto:
- *
- * <pre>
- *   var solicitud = mapper.readValue(payloadJson, &lt;ModeloGeneradoDelBanco&gt;.class);
- *   try {
- *       var respuesta = api.&lt;operacion&gt;(idempotencyKey, solicitud);      // header Idempotency-Key
- *       return new RespuestaDestino(respuesta.getStatusCode().value(), null, &lt;comprobante&gt;, null);
- *   } catch (FeignException e) {                                         // 4xx / 5xx
- *       String cuerpo = e.contentUTF8();
- *       return new RespuestaDestino(e.status(), ClasificadorRespuesta.extraerCodigo(cuerpo), null, cuerpo);
- *   } catch (RetryableException e) {                                     // timeout / conexión
- *       return new RespuestaDestino(0, null, null, e.getMessage());
- *   }
- * </pre>
+ * Envía el pago al banco con el cliente Feign generado desde bank-payments-api.yaml.
+ * La llave de idempotencia va en el header Idempotency-Key (POST /bank/v1/payments).
  */
 @Component
 public class BancoDestinoClient implements DestinoClient {
+
+    private final BankPaymentsApiClient api;
+    private final JsonMapper mapper;
+    private final String escenario;
+
+    public BancoDestinoClient(BankPaymentsApiClient api,
+                              JsonMapper mapper,
+                              // Solo para pruebas: fuerza SUCCESS, TIMEOUT, LOST_ACK, ERROR_503, RATE_LIMIT...
+                              // Vacío = comportamiento normal del simulador (AUTO).
+                              @Value("${BANK_SIMULATION_SCENARIO:}") String escenario) {
+        this.api = api;
+        this.mapper = mapper;
+        this.escenario = escenario.isBlank() ? null : escenario;
+    }
 
     @Override
     public String destino() {
@@ -29,6 +38,25 @@ public class BancoDestinoClient implements DestinoClient {
 
     @Override
     public RespuestaDestino enviar(String payloadJson, String idempotencyKey) {
-        throw new UnsupportedOperationException("Falta conectar el cliente Feign del banco (tarea de clientes Feign)");
+        try {
+            BankPaymentRequest solicitud = mapper.readValue(payloadJson, BankPaymentRequest.class);
+            // X-Correlation-Id = la misma llave: se puede rastrear el pago en el banco de punta a punta.
+            ResponseEntity<BankPaymentReceipt> respuesta =
+                    api.sendBankPayment(idempotencyKey, solicitud, idempotencyKey, escenario);
+            BankPaymentReceipt comprobante = respuesta.getBody();
+            return RespuestasFeign.exitosa(
+                    respuesta.getStatusCode().value(),
+                    comprobante == null ? null : comprobante.getReceiptId());
+        } catch (FeignException e) {
+            return RespuestasFeign.deExcepcion(e);
+        } catch (ConstraintViolationException e) {
+            return RespuestasFeign.payloadInvalido(e);
+        } catch (RuntimeException e) {
+            // Jackson 3 lanza excepciones sin chequear: aquí solo cae un payload que no entra al modelo.
+            if (e.getClass().getName().startsWith("tools.jackson.")) {
+                return RespuestasFeign.payloadInvalido(e);
+            }
+            throw e;
+        }
     }
 }

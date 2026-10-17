@@ -6,6 +6,9 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:admin}
     password: ${RABBITMQ_PASSWORD:changeme}
+    listener:
+      simple:
+        prefetch: 1
   cloud:
     openfeign:
       client:
@@ -14,6 +17,25 @@ spring:
             # Timeouts pedidos por el docente para banco y ERP
             connect-timeout: 2000
             read-timeout: 3000
+
+# URL y llave de cada cliente Feign generado. Los nombres de propiedad salen de las anotaciones
+# @FeignClient y de ClientConfiguration que genera openapi-generator (no cambiarlos a mano).
+bankPayments:
+  url: ${BANK_BASE_URL:https://REEMPLAZAR_API_ID.execute-api.us-east-1.amazonaws.com/prod}
+bankHealth:
+  url: ${BANK_BASE_URL:https://REEMPLAZAR_API_ID.execute-api.us-east-1.amazonaws.com/prod}
+bankpaymentssimulator:
+  security:
+    apiKeyAuth:
+      key: ${BANK_API_KEY:}
+erpPagos:
+  url: ${ERP_BASE_URL:https://REEMPLAZAR_API_ID.execute-api.us-east-1.amazonaws.com/prod}
+erpSalud:
+  url: ${ERP_BASE_URL:https://REEMPLAZAR_API_ID.execute-api.us-east-1.amazonaws.com/prod}
+erppaymentssimulator:
+  security:
+    apiKeyAuth:
+      key: ${ERP_API_KEY:}
 
 server:
   port: 8084
