@@ -1,15 +1,35 @@
 package gt.edu.umg.aquatech.pagosconsumer;
 
+import feign.FeignException;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.erp.api.ErpPagosApiClient;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.erp.model.ErpComprobante;
+import gt.edu.umg.aquatech.pagosconsumer.cliente.erp.model.ErpRegistroPago;
+import jakarta.validation.ConstraintViolationException;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
- * TODO: conectar con el cliente Feign generado desde erp-payments-api.yaml
- * (paquete gt.edu.umg.aquatech.pagosconsumer.cliente.erp.api). Mismo esqueleto que el banco,
- * pero la unicidad va en el cuerpo (documento_origen.numero), no en un header: ya viene dentro
- * del payload guardado, con el mismo valor que idempotencyKey.
+ * Registra el pago en el ERP con el cliente Feign generado desde erp-payments-api.yaml
+ * (POST /erp/v1/pagos). El ERP no tiene header de idempotencia: la unicidad va en el cuerpo,
+ * documento_origen.numero, que el producer ya dejó igual a la llave.
  */
 @Component
 public class ErpDestinoClient implements DestinoClient {
+
+    private final ErpPagosApiClient api;
+    private final JsonMapper mapper;
+    private final String escenario;
+
+    public ErpDestinoClient(ErpPagosApiClient api,
+                            JsonMapper mapper,
+                            // Solo para pruebas; vacío = comportamiento normal del simulador (AUTO).
+                            @Value("${ERP_SIMULATION_SCENARIO:}") String escenario) {
+        this.api = api;
+        this.mapper = mapper;
+        this.escenario = escenario.isBlank() ? null : escenario;
+    }
 
     @Override
     public String destino() {
@@ -18,6 +38,23 @@ public class ErpDestinoClient implements DestinoClient {
 
     @Override
     public RespuestaDestino enviar(String payloadJson, String idempotencyKey) {
-        throw new UnsupportedOperationException("Falta conectar el cliente Feign del ERP (tarea de clientes Feign)");
+        try {
+            ErpRegistroPago solicitud = mapper.readValue(payloadJson, ErpRegistroPago.class);
+            ResponseEntity<ErpComprobante> respuesta =
+                    api.registrarPagoErp(solicitud, idempotencyKey, escenario);
+            ErpComprobante comprobante = respuesta.getBody();
+            return RespuestasFeign.exitosa(
+                    respuesta.getStatusCode().value(),
+                    comprobante == null ? null : comprobante.getNumeroComprobante());
+        } catch (FeignException e) {
+            return RespuestasFeign.deExcepcion(e);
+        } catch (ConstraintViolationException e) {
+            return RespuestasFeign.payloadInvalido(e);
+        } catch (RuntimeException e) {
+            if (e.getClass().getName().startsWith("tools.jackson.")) {
+                return RespuestasFeign.payloadInvalido(e);
+            }
+            throw e;
+        }
     }
 }

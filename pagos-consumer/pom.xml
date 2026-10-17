@@ -17,6 +17,7 @@
         <java.version>21</java.version>
         <!-- 2025.1.2 o mas nueva es la que funciona con Spring Boot 4.1.x (AQ-111) -->
         <spring-cloud.version>2025.1.3</spring-cloud.version>
+        <aws-sdk.version>2.55.8</aws-sdk.version>
     </properties>
     <dependencies>
         <dependency>
@@ -40,6 +41,10 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-openfeign</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -57,6 +62,13 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws-sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -67,11 +79,72 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
             <!--
-                PENDIENTE: generar los clientes Feign del banco y del ERP con
-                openapi-generator-maven-plugin (library = spring-cloud) a partir de
-                src/main/resources/openapi/bank-payments-api.yaml y erp-payments-api.yaml.
-                Ver docs/feign-clientes.md. Spring Cloud ya esta confirmado (AQ-111).
+                Clientes Feign del banco y del ERP, generados desde los specs del docente
+                (src/main/resources/openapi/, no se modifican). Ver docs/feign-clientes.md.
             -->
+            <plugin>
+                <groupId>org.openapitools</groupId>
+                <artifactId>openapi-generator-maven-plugin</artifactId>
+                <version>7.21.0</version>
+                <executions>
+                    <execution>
+                        <id>banco</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <configuration>
+                            <inputSpec>${project.basedir}/src/main/resources/openapi/bank-payments-api.yaml</inputSpec>
+                            <output>${project.build.directory}/generated-sources/banco</output>
+                            <generatorName>spring</generatorName>
+                            <library>spring-cloud</library>
+                            <apiPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.banco.api</apiPackage>
+                            <modelPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.banco.model</modelPackage>
+                            <generateApiTests>false</generateApiTests>
+                            <generateModelTests>false</generateModelTests>
+                            <generateApiDocumentation>false</generateApiDocumentation>
+                            <generateModelDocumentation>false</generateModelDocumentation>
+                            <configOptions>
+                                <!-- Un paquete de configuracion por cliente: si no, los dos specs generan
+                                     la misma clase ClientConfiguration y chocan -->
+                                <configPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.banco.config</configPackage>
+                                <useSpringBoot4>true</useSpringBoot4>
+                                <useJackson3>true</useJackson3>
+                                <useTags>true</useTags>
+                                <openApiNullable>false</openApiNullable>
+                                <documentationProvider>none</documentationProvider>
+                            </configOptions>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>erp</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <configuration>
+                            <inputSpec>${project.basedir}/src/main/resources/openapi/erp-payments-api.yaml</inputSpec>
+                            <output>${project.build.directory}/generated-sources/erp</output>
+                            <generatorName>spring</generatorName>
+                            <library>spring-cloud</library>
+                            <apiPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.erp.api</apiPackage>
+                            <modelPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.erp.model</modelPackage>
+                            <generateApiTests>false</generateApiTests>
+                            <generateModelTests>false</generateModelTests>
+                            <generateApiDocumentation>false</generateApiDocumentation>
+                            <generateModelDocumentation>false</generateModelDocumentation>
+                            <configOptions>
+                                <!-- Un paquete de configuracion por cliente: si no, los dos specs generan
+                                     la misma clase ClientConfiguration y chocan -->
+                                <configPackage>gt.edu.umg.aquatech.pagosconsumer.cliente.erp.config</configPackage>
+                                <useSpringBoot4>true</useSpringBoot4>
+                                <useJackson3>true</useJackson3>
+                                <useTags>true</useTags>
+                                <openApiNullable>false</openApiNullable>
+                                <documentationProvider>none</documentationProvider>
+                            </configOptions>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
