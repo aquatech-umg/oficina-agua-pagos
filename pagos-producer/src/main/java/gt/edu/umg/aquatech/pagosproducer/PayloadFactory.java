@@ -14,32 +14,43 @@ import java.util.Map;
 
 /**
  * Arma el cuerpo (payload) de cada destino a partir de un pago (sección 8 del diseño).
- * Sin dependencias de Spring: se registra como bean en {@link ProducerConfig}.
+ * Sigue al pie de la letra los contratos del docente: bank-payments-api.yaml (BankPaymentRequest)
+ * y erp-payments-api.yaml (ErpRegistroPago). Sin dependencias de Spring: se registra como bean
+ * en {@link ProducerConfig}.
  *
- * Los campos marcados VERIFICAR son nombres que el diseño no fija: compararlos con
- * bank-payments-api.yaml / erp-payments-api.yaml y agregar los obligatorios que falten.
- * No se envía el DPI (taxId / nit), decisión 6 del diseño.
+ * No se envía el DPI ni el NIT (taxId / nit son opcionales en ambos contratos), decisión 6 del diseño.
  */
 public class PayloadFactory {
 
     private static final ZoneId GUATEMALA = ZoneId.of("America/Guatemala");
 
+    // channel del banco: CASH, CARD, BANK_TRANSFER o CHECK (este último el banco lo rechaza con 422).
     private static final Map<String, String> CANAL_BANCO = Map.of(
             "EFECTIVO", "CASH",
             "TARJETA", "CARD",
             "TRANSFERENCIA", "BANK_TRANSFER",
             "CHEQUE", "CHECK");
 
-    // CHEQUE queda sin tipo hasta resolver la decisión 7 del diseño.
+    // documento_origen.tipo del ERP es obligatorio. El ERP SÍ acepta forma_pago CHEQUE; como el contrato
+    // no tiene un tipo propio para cheque se usa RECIBO_CAJA (decisión 7 del diseño, por confirmar).
+    private static final String TIPO_DOCUMENTO_POR_DEFECTO = "RECIBO_CAJA";
     private static final Map<String, String> TIPO_DOCUMENTO_ERP = Map.of(
             "EFECTIVO", "RECIBO_CAJA",
             "TRANSFERENCIA", "BOLETA_DEPOSITO",
-            "TARJETA", "VOUCHER_TARJETA");
+            "TARJETA", "VOUCHER_TARJETA",
+            "CHEQUE", TIPO_DOCUMENTO_POR_DEFECTO);
 
     private final String equipo;
+    private final String teamCode;
 
-    public PayloadFactory(String equipo) {
+    /**
+     * @param equipo   prefijo de la llave de idempotencia, p. ej. EQA (queda EQA-000123)
+     * @param teamCode código de equipo de los contratos: EQUIPO_A, EQUIPO_B, EQUIPO_C o EQUIPO_D;
+     *                 debe coincidir con la API key (variable TEAM_CODE)
+     */
+    public PayloadFactory(String equipo, String teamCode) {
         this.equipo = equipo;
+        this.teamCode = teamCode;
     }
 
     /** Llave estable: &lt;EQUIPO&gt;-&lt;pago_id con 6 dígitos&gt;, p. ej. EQA-000123. Cumple ^[A-Za-z0-9_-]+$ */
@@ -59,22 +70,38 @@ public class PayloadFactory {
         };
     }
 
+    /** BankPaymentRequest. La llave va en el header Idempotency-Key, no en el cuerpo. */
     public Map<String, Object> banco(PagoReplica p) {
         String metodo = metodo(p);
+
+        Map<String, Object> pagador = new LinkedHashMap<>();
+        pagador.put("customerCode", codigoCliente(p.clienteId()));
+        String nombre = recortar(p.cliente(), 150);
+        if (nombre != null) {
+            pagador.put("fullName", nombre);
+        }
+
+        Map<String, Object> monto = new LinkedHashMap<>();
+        monto.put("valueInCents", centavos(p.monto()));
+        monto.put("currency", "GTQ");
+
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("customerCode", codigoCliente(p.clienteId()));
-        m.put("amount", Map.of("valueInCents", centavos(p.monto())));
-        m.put("channel", CANAL_BANCO.getOrDefault(metodo, metodo));   // VERIFICAR nombre del campo
-        m.put("paymentDate", fecha(p));                               // VERIFICAR nombre del campo
+        m.put("teamCode", teamCode);
+        m.put("payer", pagador);
+        m.put("amount", monto);
+        m.put("transactionDate", fecha(p));
+        m.put("channel", CANAL_BANCO.getOrDefault(metodo, metodo));
+        m.put("description", "Servicio de agua " + periodo(p));       // máximo 140 caracteres
         return m;
     }
 
+    /** ErpRegistroPago. La unicidad va en el cuerpo: documento_origen.numero (la misma llave). */
     public Map<String, Object> erp(PagoReplica p) {
         String metodo = metodo(p);
         YearMonth periodo = periodo(p);
 
-        // El detalle siempre debe sumar el total: si el pago es menor que el recibo,
-        // todo va a AGUA_POTABLE; la mora solo existe cuando el pago excede el recibo.
+        // El detalle siempre debe sumar el total (si no, el ERP responde 422 TOTAL_NO_CUADRA):
+        // si el pago es menor que el recibo todo va a AGUA_POTABLE; la mora solo existe si el pago excede el recibo.
         BigDecimal total = dos(p.monto());
         BigDecimal agua = dos(p.montoRecibo()).min(total);
         BigDecimal mora = total.subtract(agua);
@@ -86,19 +113,24 @@ public class PayloadFactory {
         }
 
         Map<String, Object> documento = new LinkedHashMap<>();
-        String tipo = TIPO_DOCUMENTO_ERP.get(metodo);
-        if (tipo != null) {
-            documento.put("tipo", tipo);
-        }
+        documento.put("tipo", TIPO_DOCUMENTO_ERP.getOrDefault(metodo, TIPO_DOCUMENTO_POR_DEFECTO));
         documento.put("numero", llave(p.id()));
+        documento.put("fecha_emision", p.fechaPago().toLocalDate().toString());
+
+        Map<String, Object> contribuyente = new LinkedHashMap<>();
+        contribuyente.put("codigo_cliente", codigoCliente(p.clienteId()));
+        String contador = recortar(p.numeroRegistro(), 50);
+        if (contador != null) {
+            contribuyente.put("codigo_contador", contador);
+        }
 
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("codigo_cliente", codigoCliente(p.clienteId()));
+        m.put("equipo", teamCode);
         m.put("documento_origen", documento);
-        m.put("contribuyente", Map.of("codigo_contador", p.numeroRegistro()));
+        m.put("contribuyente", contribuyente);
         m.put("periodo_fiscal", Map.of("anio", periodo.getYear(), "mes", periodo.getMonthValue()));
-        m.put("fecha_pago", fecha(p));                                // VERIFICAR nombre del campo
-        m.put("forma_pago", metodo);                                  // VERIFICAR nombre y valores
+        m.put("forma_pago", metodo);               // EFECTIVO, TARJETA, TRANSFERENCIA o CHEQUE
+        m.put("fecha_pago", fecha(p));
         m.put("total", total.toPlainString());
         m.put("detalle", detalle);
         return m;
@@ -106,7 +138,7 @@ public class PayloadFactory {
 
     private static Map<String, Object> linea(String rubro, BigDecimal monto) {
         Map<String, Object> l = new LinkedHashMap<>();
-        l.put("rubro", rubro);                                        // VERIFICAR nombre del campo
+        l.put("rubro", rubro);
         l.put("monto", monto.toPlainString());
         return l;
     }
@@ -122,6 +154,14 @@ public class PayloadFactory {
 
     private static String metodo(PagoReplica p) {
         return p.metodoPago() == null ? "" : p.metodoPago().trim().toUpperCase(Locale.ROOT);
+    }
+
+    private static String recortar(String texto, int maximo) {
+        if (texto == null || texto.isBlank()) {
+            return null;
+        }
+        String limpio = texto.trim();
+        return limpio.length() <= maximo ? limpio : limpio.substring(0, maximo);
     }
 
     /** lecturas.periodo puede ser '2026-09' o '2026-09-01': se toma año y mes. */
