@@ -45,8 +45,9 @@ public class ProducerConfig {
     }
 
     @Bean
-    PayloadFactory payloadFactory(@Value("${PAGOS_EQUIPO:EQA}") String equipo) {
-        return new PayloadFactory(equipo);
+    PayloadFactory payloadFactory(@Value("${PAGOS_EQUIPO:EQA}") String equipo,
+                                  @Value("${TEAM_CODE:EQUIPO_A}") String teamCode) {
+        return new PayloadFactory(equipo, teamCode);
     }
 
     /** Réplica de solo lectura: usuario 'lectura', conexión marcada como read-only. */

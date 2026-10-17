@@ -6,6 +6,13 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:admin}
     password: ${RABBITMQ_PASSWORD:changeme}
+    # Obligatorio: sin esto waitForConfirmsOrDie falla y el producer no puede publicar con confirmación
+    publisher-confirm-type: correlated
+
+pagos:
+  producer:
+    intervalo-ms: 10000
+    lote: 500
 
 server:
   port: 8083
