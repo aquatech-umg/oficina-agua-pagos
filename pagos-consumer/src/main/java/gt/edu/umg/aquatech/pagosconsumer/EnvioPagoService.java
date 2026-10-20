@@ -2,6 +2,7 @@ package gt.edu.umg.aquatech.pagosconsumer;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -9,8 +10,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * AQ-121. Procesa un mensaje: lee el ítem, evita reenviar lo ya entregado, envía el payload guardado
- * con la misma llave, y registra el resultado de cada intento antes de que el listener haga ack.
+ * AQ-121 y AQ-129. Procesa un mensaje: lee el ítem, evita reenviar lo ya entregado, envía el payload guardado
+ * con la misma llave, registra el intento y decide el destino del mensaje:
+ * <ul>
+ *   <li>éxito (201 o 409 de duplicado) -> ítem ENVIADO;</li>
+ *   <li>fallo transitorio -> cola de espera con retardo creciente (el ítem sigue EN_COLA);</li>
+ *   <li>fallo definitivo o reintentos agotados -> pagos.dlq e ítem FALLIDO.</li>
+ * </ul>
+ * El listener hace ack solo cuando este método termina sin excepción, o sea después de registrar el resultado
+ * y de que RabbitMQ confirmó la publicación en la cola de espera o en pagos.dlq.
  */
 @Service
 public class EnvioPagoService {
@@ -26,10 +34,12 @@ public class EnvioPagoService {
     private static final Logger log = LoggerFactory.getLogger(EnvioPagoService.class);
 
     private final ControlPagosRepository control;
+    private final EncoladorPagos encolador;
     private final Map<String, DestinoClient> clientes;
 
-    public EnvioPagoService(ControlPagosRepository control, List<DestinoClient> clientes) {
+    public EnvioPagoService(ControlPagosRepository control, EncoladorPagos encolador, List<DestinoClient> clientes) {
         this.control = control;
+        this.encolador = encolador;
         this.clientes = clientes.stream().collect(Collectors.toMap(DestinoClient::destino, Function.identity()));
     }
 
@@ -53,8 +63,10 @@ public class EnvioPagoService {
             log.info("{} ya está {}; se descarta el mensaje", pagoDestino, item.estado());
             return Decision.ACK;
         }
-        if (control.existeExitoso(pagoDestino)) {
-            log.info("{} ya tiene un intento exitoso en pagos-logs; se descarta el mensaje", pagoDestino);
+        Optional<ControlPagosRepository.IntentoExitoso> yaEntregado = control.buscarExitoso(pagoDestino);
+        if (yaEntregado.isPresent()) {
+            log.info("{} ya tiene un intento exitoso en pagos-logs; se descarta el mensaje y se marca ENVIADO", pagoDestino);
+            control.marcarEnviado(pagoDestino, item.intentos(), yaEntregado.get().referenciaExterna());
             return Decision.ACK;
         }
 
@@ -67,17 +79,30 @@ public class EnvioPagoService {
         String codigoError = respuesta.codigoError() != null
                 ? respuesta.codigoError()
                 : ClasificadorRespuesta.extraerCodigo(respuesta.cuerpo());
-        RespuestaDestino registrada = new RespuestaDestino(
-                respuesta.httpStatus(), codigoError, respuesta.referenciaExterna(), respuesta.cuerpo());
+        RespuestaDestino registrada = new RespuestaDestino(respuesta.httpStatus(), codigoError,
+                respuesta.referenciaExterna(), respuesta.cuerpo(), respuesta.retryAfterSegundos());
 
         control.registrarIntento(pagoDestino, intento, resultado, registrada, duracionMs);
-        control.actualizarTrasIntento(pagoDestino, intento, resultado, ultimoError(registrada));
-
         log.info("{} intento {} -> {} (HTTP {})", pagoDestino, intento, resultado, respuesta.httpStatus());
-        if (resultado == Resultado.FALLIDO_REINTENTABLE) {
-            // Sprint 9: aquí irá a la cola de espera con retardo creciente. Por ahora el ítem queda
-            // EN_COLA con intentos y ultimoError al día, y el mensaje se da por atendido.
-            log.warn("{} falló con un error reintentable; queda EN_COLA hasta que exista la cola de espera", pagoDestino);
+
+        if (resultado.esExito()) {
+            control.marcarEnviado(pagoDestino, intento, respuesta.referenciaExterna());
+            return Decision.ACK;
+        }
+
+        String ultimoError = ultimoError(registrada);
+        PoliticaReintentos.Decision decision = PoliticaReintentos.decidirTrasFallo(
+                resultado, item.intentoEnTanda(), respuesta.retryAfterSegundos());
+
+        if (decision.accion() == PoliticaReintentos.Accion.ESPERAR) {
+            encolador.aEspera(mensaje, decision.esperaSegundos());
+            control.actualizarIntento(pagoDestino, intento, ultimoError);
+            log.warn("{} falló ({}); reintento {} de {} en {} s", pagoDestino, ultimoError,
+                    item.intentoEnTanda() + 1, PoliticaReintentos.MAX_INTENTOS, decision.esperaSegundos());
+        } else {
+            encolador.aDeadLetter(mensaje, decision.motivo(), intento, respuesta.httpStatus(), codigoError);
+            control.marcarFallido(pagoDestino, intento, ultimoError);
+            log.error("{} -> pagos.dlq y FALLIDO ({}: {})", pagoDestino, decision.motivo(), ultimoError);
         }
         return Decision.ACK;
     }

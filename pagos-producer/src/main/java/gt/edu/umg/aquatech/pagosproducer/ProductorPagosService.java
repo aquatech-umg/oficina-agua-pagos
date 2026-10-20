@@ -102,25 +102,36 @@ public class ProductorPagosService {
     public int publicarPendientes() {
         int publicados = 0;
         for (Map<String, AttributeValue> item : control.pendientes(lote)) {
-            // Todo sale de la clave (EQA-000123#BANCO), que siempre viene en el índice, sin depender
-            // de qué atributos proyecte el índice secundario.
-            String pagoDestino = item.get("pagoDestino").s();
-            int separador = pagoDestino.indexOf('#');
-            String llave = pagoDestino.substring(0, separador);
-            Destino destino = Destino.valueOf(pagoDestino.substring(separador + 1));
-            long pagoId = Long.parseLong(llave.substring(llave.lastIndexOf('-') + 1));
-
-            if (!control.reclamar(pagoDestino)) {
-                continue;   // otra corrida ya lo reclamó: no se publica de nuevo
-            }
-            try {
-                publicador.publicar(destino, pagoId, llave);
+            if (reclamarYPublicar(item.get("pagoDestino").s())) {
                 publicados++;
-            } catch (RuntimeException e) {
-                log.warn("No se pudo publicar {}; vuelve a PENDIENTE", pagoDestino, e);
-                control.devolverAPendiente(pagoDestino);
             }
         }
         return publicados;
+    }
+
+    /**
+     * Reclama un ítem PENDIENTE (-> EN_COLA, condicional) y publica su mensaje con confirmación. Lo usan el
+     * ciclo normal y POST /retry. Devuelve false si otra corrida ya lo reclamó o si no se pudo publicar
+     * (en ese caso el ítem vuelve a PENDIENTE).
+     */
+    public boolean reclamarYPublicar(String pagoDestino) {
+        // Todo sale de la clave (EQA-000123#BANCO), que siempre viene en el índice, sin depender
+        // de qué atributos proyecte el índice secundario.
+        int separador = pagoDestino.indexOf('#');
+        String llave = pagoDestino.substring(0, separador);
+        Destino destino = Destino.valueOf(pagoDestino.substring(separador + 1));
+        long pagoId = Long.parseLong(llave.substring(llave.lastIndexOf('-') + 1));
+
+        if (!control.reclamar(pagoDestino)) {
+            return false;   // otra corrida ya lo reclamó: no se publica de nuevo
+        }
+        try {
+            publicador.publicar(destino, pagoId, llave);
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("No se pudo publicar {}; vuelve a PENDIENTE", pagoDestino, e);
+            control.devolverAPendiente(pagoDestino);
+            return false;
+        }
     }
 }

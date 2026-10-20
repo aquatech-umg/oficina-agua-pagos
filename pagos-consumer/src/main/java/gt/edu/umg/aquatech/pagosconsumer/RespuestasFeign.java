@@ -23,7 +23,27 @@ final class RespuestasFeign {
             return new RespuestaDestino(0, null, null, e.getMessage());
         }
         String cuerpo = e.contentUTF8();
-        return new RespuestaDestino(e.status(), ClasificadorRespuesta.extraerCodigo(cuerpo), null, cuerpo);
+        return new RespuestaDestino(e.status(), ClasificadorRespuesta.extraerCodigo(cuerpo), null, cuerpo,
+                retryAfter(e));
+    }
+
+    /** Retry-After en segundos (503 y 429 de los simuladores). Si viene como fecha HTTP se ignora. */
+    static Integer retryAfter(FeignException e) {
+        if (e.responseHeaders() == null) {
+            return null;
+        }
+        for (var cabecera : e.responseHeaders().entrySet()) {
+            if ("Retry-After".equalsIgnoreCase(cabecera.getKey())) {
+                for (String valor : cabecera.getValue()) {
+                    try {
+                        return Integer.valueOf(valor.trim());
+                    } catch (NumberFormatException ignorado) {
+                        // formato de fecha: se usa la espera propia
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**

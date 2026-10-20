@@ -6,6 +6,7 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:admin}
     password: ${RABBITMQ_PASSWORD:changeme}
+    publisher-confirm-type: correlated
     listener:
       simple:
         prefetch: 1
