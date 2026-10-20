@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,15 +18,32 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
-/** Acceso del consumer a pagos-control (leer, actualizar intentos) y pagos-logs (solo agregar). */
+/**
+ * Acceso del consumer a pagos-control y pagos-logs. Todas las transiciones de estado que hace el consumer
+ * son condicionales sobre EN_COLA: EN_COLA -> ENVIADO y EN_COLA -> FALLIDO (sección 4 del diseño).
+ */
 @Component
 public class ControlPagosRepository {
 
     private static final Logger log = LoggerFactory.getLogger(ControlPagosRepository.class);
 
-    /** Lo que el consumer necesita saber de un ítem de pagos-control. */
+    /**
+     * Lo que el consumer necesita saber de un ítem de pagos-control.
+     *
+     * @param intentos      intentos hechos en total (nunca se reinicia: es la numeración de pagos-logs)
+     * @param intentosBase  intentos que había cuando empezó la tanda actual; POST /retry lo iguala a
+     *                      {@code intentos}, así cada reintento manual tiene sus 5 intentos nuevos
+     */
     public record ItemControl(String pagoDestino, String idempotencyKey, String payload,
-                              String estado, int intentos) {
+                              String estado, int intentos, int intentosBase) {
+
+        public int intentoEnTanda() {
+            return intentos + 1 - intentosBase;
+        }
+    }
+
+    /** Un intento exitoso ya registrado en pagos-logs. */
+    public record IntentoExitoso(int intento, String referenciaExterna) {
     }
 
     private final DynamoDbClient dynamo;
@@ -45,7 +63,7 @@ public class ControlPagosRepository {
         GetItemResponse r = dynamo.getItem(GetItemRequest.builder()
                 .tableName(tablaControl)
                 .consistentRead(true)
-                .key(Map.of("pagoDestino", AttributeValue.fromS(pagoDestino)))
+                .key(clave(pagoDestino))
                 .build());
         if (!r.hasItem() || r.item().isEmpty()) {
             return null;
@@ -56,15 +74,16 @@ public class ControlPagosRepository {
                 i.get("idempotencyKey").s(),
                 i.get("payload").s(),
                 i.get("estado").s(),
-                i.containsKey("intentos") ? Integer.parseInt(i.get("intentos").n()) : 0);
+                entero(i, "intentos"),
+                entero(i, "intentosBase"));
     }
 
     /**
-     * ¿Ya hay un intento EXITOSO en pagos-logs? Hace falta porque quien marca ENVIADO es un proceso
-     * aparte (sprint 9): mientras tanto, el log es la prueba de que el pago ya se entregó.
+     * ¿Ya hay un intento EXITOSO en pagos-logs? Protege contra reenviar algo ya entregado cuando el mensaje
+     * se repite (RabbitMQ entrega al menos una vez) y el ítem todavía no llegó a ENVIADO.
      */
-    public boolean existeExitoso(String pagoDestino) {
-        return !dynamo.query(QueryRequest.builder()
+    public Optional<IntentoExitoso> buscarExitoso(String pagoDestino) {
+        return dynamo.query(QueryRequest.builder()
                         .tableName(tablaLogs)
                         .consistentRead(true)
                         .keyConditionExpression("pagoDestino = :pd")
@@ -73,7 +92,10 @@ public class ControlPagosRepository {
                                 ":pd", AttributeValue.fromS(pagoDestino),
                                 ":ok", AttributeValue.fromS("EXITOSO")))
                         .build())
-                .items().isEmpty();
+                .items().stream().findFirst()
+                .map(i -> new IntentoExitoso(
+                        entero(i, "intento"),
+                        i.containsKey("referenciaExterna") ? i.get("referenciaExterna").s() : null));
     }
 
     /** Un registro por intento, solo se agrega. Condicional: reprocesar el mismo intento no duplica. */
@@ -104,33 +126,42 @@ public class ControlPagosRepository {
         }
     }
 
-    /**
-     * Actualiza intentos / ultimoError del ítem. Solo si sigue EN_COLA. Si el resultado es un fallo
-     * definitivo, también lo pasa a FALLIDO (el consumer es el único que escribe ese estado).
-     * El paso a ENVIADO NO lo hace el consumer.
-     */
-    public void actualizarTrasIntento(String pagoDestino, int intento, Resultado resultado, String ultimoError) {
+    /** Fallo reintentable: el ítem sigue EN_COLA (el mensaje espera en su cola de espera). */
+    public void actualizarIntento(String pagoDestino, int intento, String ultimoError) {
+        actualizar(pagoDestino, intento,
+                "SET intentos = :i, ultimoIntentoEn = :t, actualizadoEn = :t, ultimoError = :e",
+                Map.of(":e", AttributeValue.fromS(ultimoError)));
+    }
+
+    /** EN_COLA -> ENVIADO: el destino respondió 201 o 409 de duplicado. Guarda el comprobante. */
+    public void marcarEnviado(String pagoDestino, int intento, String referenciaExterna) {
         Map<String, AttributeValue> valores = new HashMap<>();
+        valores.put(":enviado", AttributeValue.fromS("ENVIADO"));
+        String expresion = "SET #e = :enviado, intentos = :i, ultimoIntentoEn = :t, actualizadoEn = :t, enviadoEn = :t";
+        if (referenciaExterna != null) {
+            expresion += ", referenciaExterna = :r";
+            valores.put(":r", AttributeValue.fromS(referenciaExterna));
+        }
+        actualizar(pagoDestino, intento, expresion + " REMOVE ultimoError", valores);
+    }
+
+    /** EN_COLA -> FALLIDO: rechazo definitivo o reintentos agotados. Solo POST /retry lo saca de ahí. */
+    public void marcarFallido(String pagoDestino, int intento, String ultimoError) {
+        actualizar(pagoDestino, intento,
+                "SET #e = :fallido, intentos = :i, ultimoIntentoEn = :t, actualizadoEn = :t, ultimoError = :e",
+                Map.of(":fallido", AttributeValue.fromS("FALLIDO"), ":e", AttributeValue.fromS(ultimoError)));
+    }
+
+    private void actualizar(String pagoDestino, int intento, String expresion,
+                            Map<String, AttributeValue> valoresExtra) {
+        Map<String, AttributeValue> valores = new HashMap<>(valoresExtra);
         valores.put(":i", AttributeValue.fromN(Integer.toString(intento)));
         valores.put(":t", AttributeValue.fromS(ahora()));
         valores.put(":enCola", AttributeValue.fromS("EN_COLA"));
-
-        String expresion;
-        if (resultado.esExito()) {
-            expresion = "SET intentos = :i, actualizadoEn = :t REMOVE ultimoError";
-        } else if (resultado == Resultado.FALLIDO_DEFINITIVO) {
-            expresion = "SET intentos = :i, actualizadoEn = :t, ultimoError = :e, #e = :fallido";
-            valores.put(":e", AttributeValue.fromS(ultimoError));
-            valores.put(":fallido", AttributeValue.fromS("FALLIDO"));
-        } else {
-            expresion = "SET intentos = :i, actualizadoEn = :t, ultimoError = :e";
-            valores.put(":e", AttributeValue.fromS(ultimoError));
-        }
-
         try {
             dynamo.updateItem(UpdateItemRequest.builder()
                     .tableName(tablaControl)
-                    .key(Map.of("pagoDestino", AttributeValue.fromS(pagoDestino)))
+                    .key(clave(pagoDestino))
                     .updateExpression(expresion)
                     .conditionExpression("#e = :enCola")
                     .expressionAttributeNames(Map.of("#e", "estado"))
@@ -139,6 +170,14 @@ public class ControlPagosRepository {
         } catch (ConditionalCheckFailedException e) {
             log.warn("{} ya no estaba EN_COLA; el intento {} quedó solo en pagos-logs", pagoDestino, intento);
         }
+    }
+
+    private static int entero(Map<String, AttributeValue> item, String atributo) {
+        return item.containsKey(atributo) ? Integer.parseInt(item.get(atributo).n()) : 0;
+    }
+
+    private static Map<String, AttributeValue> clave(String pagoDestino) {
+        return Map.of("pagoDestino", AttributeValue.fromS(pagoDestino));
     }
 
     private static String ahora() {

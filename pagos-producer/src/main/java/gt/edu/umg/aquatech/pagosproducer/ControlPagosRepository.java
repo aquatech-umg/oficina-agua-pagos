@@ -160,6 +160,44 @@ public class ControlPagosRepository {
         }
     }
 
+    // ---- consulta y reintento manual -------------------------------------------------------
+
+    /** Lectura consistente de un ítem (pago, destino), o null si no existe. */
+    public Map<String, AttributeValue> leer(String pagoDestino) {
+        GetItemResponse r = dynamo.getItem(GetItemRequest.builder()
+                .tableName(tabla)
+                .consistentRead(true)
+                .key(clave(pagoDestino))
+                .build());
+        return (r.hasItem() && !r.item().isEmpty()) ? r.item() : null;
+    }
+
+    /**
+     * POST /retry: FALLIDO -> PENDIENTE (la única salida de FALLIDO). Con condición: si el ítem ya no está
+     * FALLIDO no hace nada y devuelve false. Deja intentosBase = intentos para que el consumer cuente 5 intentos
+     * nuevos, sin reiniciar la numeración de pagos-logs (que es la clave de cada intento).
+     */
+    public boolean reintentar(String pagoDestino) {
+        try {
+            dynamo.updateItem(UpdateItemRequest.builder()
+                    .tableName(tabla)
+                    .key(clave(pagoDestino))
+                    .updateExpression("SET #e = :pendiente, intentosBase = intentos + :cero, actualizadoEn = :t "
+                            + "REMOVE ultimoError, encoladoEn")
+                    .conditionExpression("#e = :fallido")
+                    .expressionAttributeNames(Map.of("#e", "estado"))
+                    .expressionAttributeValues(Map.of(
+                            ":pendiente", AttributeValue.fromS("PENDIENTE"),
+                            ":fallido", AttributeValue.fromS("FALLIDO"),
+                            ":cero", AttributeValue.fromN("0"),
+                            ":t", AttributeValue.fromS(ahora())))
+                    .build());
+            return true;
+        } catch (ConditionalCheckFailedException e) {
+            return false;
+        }
+    }
+
     // ---- utilidades -----------------------------------------------------------------------
 
     private static String pagoDestino(String idempotencyKey, Destino destino) {
