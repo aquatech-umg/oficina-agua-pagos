@@ -1,0 +1,13 @@
+{
+  "equipo": "EQUIPO_A",
+  "documento_origen": { "tipo": "RECIBO_CAJA", "numero": "EQA-PRUEBA-0001", "fecha_emision": "2026-10-18" },
+  "contribuyente": { "codigo_cliente": "CLI-0001", "codigo_contador": "4821" },
+  "periodo_fiscal": { "anio": 2026, "mes": 9 },
+  "forma_pago": "EFECTIVO",
+  "fecha_pago": "2026-10-18T10:00:00-06:00",
+  "total": "150.75",
+  "detalle": [
+    { "rubro": "AGUA_POTABLE", "monto": "140.00" },
+    { "rubro": "MORA", "monto": "10.75" }
+  ]
+}

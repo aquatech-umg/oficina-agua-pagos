@@ -1,0 +1,8 @@
+{
+  "teamCode": "EQUIPO_A",
+  "payer": { "customerCode": "CLI-0001", "fullName": "Cliente de Prueba" },
+  "amount": { "valueInCents": 15075, "currency": "GTQ" },
+  "transactionDate": "2026-10-18T10:00:00-06:00",
+  "channel": "CASH",
+  "description": "Servicio de agua 2026-09"
+}

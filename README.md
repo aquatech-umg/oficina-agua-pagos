@@ -70,7 +70,7 @@ Con RabbitMQ arriba (`docker compose up -d`), desde la carpeta de cada servicio:
 
 El contrato del producer genera interfaces Java al compilar (`./mvnw clean compile`); quedan en `target/generated-sources/openapi`.
 
-## Flujo (según el diagrama del ingeniero)
+## Flujo 
 
 1. El **producer** lee los pagos de la **réplica de solo lectura**, crea el control de cada entrega en DynamoDB (`pagos-control`) y publica un mensaje por destino en la **cola**.
 2. El **consumer** toma cada pago de la cola y lo entrega a **dos destinos**: el **banco** y el **ERP municipal**.
@@ -104,7 +104,16 @@ La llave de unicidad debe ser **estable**, derivada del pago del monolito (por e
 | 429, 500, 502, 503, 504, timeout | Reintentar con backoff (respetar `Retry-After`). |
 | 400, 403, 422 | No reintentar: dead-letter. |
 
-Timeouts recomendados por el docente: connect 2 s, read 3 s. Las API keys y las URLs van en variables de entorno (ver `.env.example`), nunca en el repo.
+Timeouts recomendados por el docente: connect 2 s, read 3 s. Las URLs y las credenciales van en variables de entorno (ver `.env.example`), nunca en el repo.
+
+Variables de los simuladores (las lee el consumer):
+
+| Variable | Para qué |
+|---|---|
+| `BANK_BASE_URL`, `ERP_BASE_URL` | URL base de cada simulador (hoy es la misma y termina en `/prod`). |
+| `SIMULADOR_USUARIO`, `SIMULADOR_PASSWORD` | Si se definen, se envía `Authorization: Basic` a banco y ERP. Vacías: no se envía. |
+| `BANK_API_KEY`, `ERP_API_KEY` | Si se definen, se envía `x-api-key` (lo que dice el contrato). Vacías: no se envía. |
+| `BANK_SIMULATION_SCENARIO`, `ERP_SIMULATION_SCENARIO` | Solo pruebas: fuerza un escenario del simulador. Vacías: comportamiento normal. |
 
 ## Endpoints del contrato
 
