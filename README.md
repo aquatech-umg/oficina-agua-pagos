@@ -78,9 +78,9 @@ El contrato del producer genera interfaces Java al compilar (`./mvnw clean compi
 
 Diseño completo en [`docs/diseno-control-pagos.md`](docs/diseno-control-pagos.md). La bandera de "pago enviado" vive en DynamoDB (`pagos-control`): el docente permite tocar la base, pero el diseño en DynamoDB ya cumple y no choca con la réplica de solo lectura.
 
-## Destinos externos (specs del docente)
+## Destinos externos 
 
-Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el docente los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
+Los specs `bank-payments-api.yaml` y `erp-payments-api.yaml` están en `pagos-consumer/src/main/resources/openapi/`. **No se modifican**: el ingeniero los entrega como contrato, y con ellos se genera un cliente Feign con `openapi-generator-maven-plugin` (`library = spring-cloud`).
 
 El banco y el ERP no piden el mismo formato a propósito:
 
@@ -106,7 +106,10 @@ La llave de unicidad debe ser **estable**, derivada del pago del monolito (por e
 
 Timeouts recomendados por el docente: connect 2 s, read 3 s. Las URLs y las credenciales van en variables de entorno (ver `.env.example`), nunca en el repo.
 
-Variables de los simuladores (las lee el consumer):
+
+Variables de los simuladores 
+
+consumer:
 
 | Variable | Para qué |
 |---|---|
@@ -114,6 +117,16 @@ Variables de los simuladores (las lee el consumer):
 | `SIMULADOR_USUARIO`, `SIMULADOR_PASSWORD` | Si se definen, se envía `Authorization: Basic` a banco y ERP. Vacías: no se envía. |
 | `BANK_API_KEY`, `ERP_API_KEY` | Si se definen, se envía `x-api-key` (lo que dice el contrato). Vacías: no se envía. |
 | `BANK_SIMULATION_SCENARIO`, `ERP_SIMULATION_SCENARIO` | Solo pruebas: fuerza un escenario del simulador. Vacías: comportamiento normal. |
+
+producer:
+
+| Variable | Para qué |
+|---|---|
+| `PAGOS_DESDE` | Fecha mínima (`yyyy-MM-dd`) de `fecha_pago` que el producer toma de la réplica. **Si no se define, arranca en 1970: sin filtro, manda todos los pagos (~37 mil).** Para la demo usar `2026-09-19`. Vacía equivale a no definirla. |
+| `TEAM_CODE` | Código de equipo de los contratos (`EQUIPO_A`...); debe coincidir con la API key. |
+| `PAGOS_EQUIPO` | Prefijo de la llave de idempotencia (por defecto `EQA`, queda `EQA-000123`). |
+| `DB_REPLICA_HOST`, `DB_REPLICA_PORT`, `DB_REPLICA_NAME` | Réplica de solo lectura (por defecto `localhost`, `3307`, `oficina_agua`). Ojo: `.env.example` trae `DB_NAME`, pero el producer lee `DB_REPLICA_NAME`. |
+| `DB_LECTURA_USER`, `DB_LECTURA_PASSWORD` | Usuario de solo lectura de la réplica. |
 
 ## Endpoints del contrato
 

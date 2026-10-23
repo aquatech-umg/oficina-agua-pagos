@@ -11,12 +11,7 @@ import org.springframework.stereotype.Service;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import tools.jackson.databind.json.JsonMapper;
 
-/**
- * AQ-120. Un ciclo hace dos cosas, ambas seguras de repetir:
- * 1) detectarNuevos: réplica -> ítems PENDIENTE en pagos-control (PutItem condicional) y cursor.
- * 2) publicarPendientes: PENDIENTE -> EN_COLA (condicional) y mensaje a RabbitMQ con confirms.
- * Correrlo dos veces no duplica ítems (1) ni mensajes de ítems ya reclamados (2).
- */
+
 @Service
 public class ProductorPagosService {
 
@@ -47,7 +42,8 @@ public class ProductorPagosService {
         this.payloads = payloads;
         this.publicador = publicador;
         this.mapper = mapper;
-        this.desde = LocalDate.parse(desde);
+        // Variable definida pero vacía (PAGOS_DESDE=) = sin filtro, igual que si no existiera.
+        this.desde = desde.isBlank() ? LocalDate.of(1970, 1, 1) : LocalDate.parse(desde.trim());
         this.lote = lote;
     }
 

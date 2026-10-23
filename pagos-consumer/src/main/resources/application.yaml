@@ -10,6 +10,8 @@ spring:
     listener:
       simple:
         prefetch: 1
+  jackson:
+    default-property-inclusion: non_null
   cloud:
     openfeign:
       client:
