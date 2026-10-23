@@ -9,17 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-/**
- * AQ-121 y AQ-129. Procesa un mensaje: lee el ítem, evita reenviar lo ya entregado, envía el payload guardado
- * con la misma llave, registra el intento y decide el destino del mensaje:
- * <ul>
- *   <li>éxito (201 o 409 de duplicado) -> ítem ENVIADO;</li>
- *   <li>fallo transitorio -> cola de espera con retardo creciente (el ítem sigue EN_COLA);</li>
- *   <li>fallo definitivo o reintentos agotados -> pagos.dlq e ítem FALLIDO.</li>
- * </ul>
- * El listener hace ack solo cuando este método termina sin excepción, o sea después de registrar el resultado
- * y de que RabbitMQ confirmó la publicación en la cola de espera o en pagos.dlq.
- */
+
 @Service
 public class EnvioPagoService {
 
@@ -90,7 +80,7 @@ public class EnvioPagoService {
             return Decision.ACK;
         }
 
-        String ultimoError = ultimoError(registrada);
+        String ultimoError = DetalleError.ultimoError(registrada);
         PoliticaReintentos.Decision decision = PoliticaReintentos.decidirTrasFallo(
                 resultado, item.intentoEnTanda(), respuesta.retryAfterSegundos());
 
@@ -105,12 +95,5 @@ public class EnvioPagoService {
             log.error("{} -> pagos.dlq y FALLIDO ({}: {})", pagoDestino, decision.motivo(), ultimoError);
         }
         return Decision.ACK;
-    }
-
-    private static String ultimoError(RespuestaDestino r) {
-        if (r.codigoError() != null) {
-            return r.codigoError();
-        }
-        return r.httpStatus() == 0 ? "TIMEOUT_O_CONEXION" : "HTTP_" + r.httpStatus();
     }
 }

@@ -115,6 +115,10 @@ public class ControlPagosRepository {
         if (respuesta.referenciaExterna() != null) {
             item.put("referenciaExterna", AttributeValue.fromS(respuesta.referenciaExterna()));
         }
+        String detalle = DetalleError.resumir(respuesta.cuerpo(), DetalleError.MAX_DETALLE_LOG);
+        if (detalle != null) {
+            item.put("detalle", AttributeValue.fromS(detalle));   // cuerpo de la respuesta, para saber qué falló
+        }
         try {
             dynamo.putItem(PutItemRequest.builder()
                     .tableName(tablaLogs)
