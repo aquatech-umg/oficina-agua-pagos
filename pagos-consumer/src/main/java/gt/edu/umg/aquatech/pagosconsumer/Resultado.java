@@ -1,6 +1,6 @@
 package gt.edu.umg.aquatech.pagosconsumer;
 
-/** Cómo se interpreta la respuesta de un destino (sección 6 del diseño). */
+/** Cómo se interpreta la respuesta de un destino. */
 public enum Resultado {
     /** 201: entregado. */
     EXITOSO,
@@ -8,7 +8,7 @@ public enum Resultado {
     EXITOSO_DUPLICADO,
     /** 400, 403, 422 o 409 de llave reutilizada: no se reintenta, el ítem pasa a FALLIDO. */
     FALLIDO_DEFINITIVO,
-    /** 429, 500, 502, 503, 504 o timeout: se podría reintentar (las colas de espera son del sprint 9). */
+    /** 429, 500, 502, 503, 504 o timeout: se reintenta con espera creciente. */
     FALLIDO_REINTENTABLE;
 
     public boolean esExito() {

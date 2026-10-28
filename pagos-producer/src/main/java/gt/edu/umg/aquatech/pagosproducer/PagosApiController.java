@@ -14,9 +14,8 @@ import org.springframework.lang.Nullable;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Implementa la interfaz generada desde payments-api.yaml (contract-first). En este sprint solo se implementan
- * el estado de un pago (GET) y el reintento manual (POST /retry); las otras dos operaciones del contrato
- * responden 501 hasta que alguien las tome.
+ * Implementa la interfaz generada desde payments-api.yaml: estado de un pago (GET) y reintento (POST /retry).
+ * Las operaciones list y dispatch del contrato responden 501.
  */
 @RestController
 public class PagosApiController implements PaymentsApi {

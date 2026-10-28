@@ -47,8 +47,8 @@ public class EnvioPagoService {
             return Decision.RECHAZAR;
         }
 
-        // Mensaje repetido de algo ya resuelto: descartar con ack, sin llamar al destino.
-        // (RabbitMQ entrega "al menos una vez", así que esto es normal.)
+        // RabbitMQ entrega al menos una vez: un mensaje repetido de algo ya resuelto
+        // se descarta sin llamar al destino.
         if ("ENVIADO".equals(item.estado()) || "FALLIDO".equals(item.estado())) {
             log.info("{} ya está {}; se descarta el mensaje", pagoDestino, item.estado());
             return Decision.ACK;

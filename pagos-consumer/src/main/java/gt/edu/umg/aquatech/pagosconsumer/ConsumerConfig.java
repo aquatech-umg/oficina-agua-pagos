@@ -21,7 +21,6 @@ public class ConsumerConfig {
     public static final String COLA_ERP = "pagos.erp";
     public static final String COLA_DLQ = "pagos.dlq";
 
-    /** Cola principal del destino ("BANCO" o "ERP"). */
     public static String colaPrincipal(String destino) {
         return "BANCO".equals(destino) ? COLA_BANCO : COLA_ERP;
     }
@@ -31,11 +30,7 @@ public class ConsumerConfig {
         return "%s.retry.%ds".formatted(colaPrincipal, segundos);
     }
 
-    /**
-     * Las colas principales se declaran IGUAL que en el producer (durables y sin argumentos extra): si los
-     * argumentos difieren, RabbitMQ responde PRECONDITION_FAILED. Por eso la espera y el dead-letter viven en
-     * colas aparte, y las principales no se tocan.
-     */
+    /** Mismas colas y argumentos que declara el producer; si difieren, RabbitMQ responde PRECONDITION_FAILED. */
     @Bean
     Queue colaBanco() {
         return QueueBuilder.durable(COLA_BANCO).build();
@@ -47,9 +42,8 @@ public class ConsumerConfig {
     }
 
     /**
-     * Una cola de espera por destino y por escalón. No tienen consumidor: el mensaje espera su TTL y
-     * RabbitMQ lo devuelve solo a la cola principal (dead-letter hacia el exchange por defecto, con la cola
-     * principal como routing key). Más pagos.dlq, donde terminan los pagos que se rinden.
+     * Una cola de espera por destino y escalón, sin consumidor: al vencer el TTL RabbitMQ devuelve el mensaje
+     * a la cola principal (dead-letter al exchange por defecto). Incluye también pagos.dlq.
      */
     @Bean
     Declarables colasDeEsperaYDeadLetter() {
@@ -67,7 +61,7 @@ public class ConsumerConfig {
         return new Declarables(colas);
     }
 
-    /** Local: DYNAMODB_ENDPOINT=http://localhost:8012. En AWS se omite el endpoint. */
+    /** El endpoint solo se define en local (DynamoDB Local). */
     @Bean
     DynamoDbClient dynamoDbClient(
             @Value("${DYNAMODB_ENDPOINT:}") String endpoint,

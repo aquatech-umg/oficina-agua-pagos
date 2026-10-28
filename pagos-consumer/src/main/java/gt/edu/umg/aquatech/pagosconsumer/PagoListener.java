@@ -44,9 +44,8 @@ public class PagoListener {
                 canal.basicReject(etiqueta, false);
             }
         } catch (RuntimeException e) {
-            // Falla inesperada (DynamoDB caído, cliente sin conectar...): no se pierde el mensaje.
-            // Cuidado: reencolar puede girar en bucle mientras dure la falla (el sprint 9 lo reemplaza
-            // por colas de espera + dead-letter).
+            // Falla inesperada: el mensaje vuelve a la cola para no perder el pago.
+            // Puede repetirse en bucle mientras dure la falla.
             log.error("Falla procesando {}; el mensaje vuelve a la cola", pago.pagoDestino(), e);
             canal.basicNack(etiqueta, false, true);
         }

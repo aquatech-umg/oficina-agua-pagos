@@ -18,21 +18,15 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
-/**
- * Acceso del consumer a pagos-control y pagos-logs. Todas las transiciones de estado que hace el consumer
- * son condicionales sobre EN_COLA: EN_COLA -> ENVIADO y EN_COLA -> FALLIDO (sección 4 del diseño).
- */
+/** Acceso a pagos-control y pagos-logs. Las transiciones del consumer son condicionales sobre EN_COLA. */
 @Component
 public class ControlPagosRepository {
 
     private static final Logger log = LoggerFactory.getLogger(ControlPagosRepository.class);
 
     /**
-     * Lo que el consumer necesita saber de un ítem de pagos-control.
-     *
-     * @param intentos      intentos hechos en total (nunca se reinicia: es la numeración de pagos-logs)
-     * @param intentosBase  intentos que había cuando empezó la tanda actual; POST /retry lo iguala a
-     *                      {@code intentos}, así cada reintento manual tiene sus 5 intentos nuevos
+     * @param intentos     intentos totales (numeración de pagos-logs; nunca se reinicia)
+     * @param intentosBase intentos al empezar la tanda actual; POST /retry lo iguala a {@code intentos}
      */
     public record ItemControl(String pagoDestino, String idempotencyKey, String payload,
                               String estado, int intentos, int intentosBase) {
@@ -42,7 +36,6 @@ public class ControlPagosRepository {
         }
     }
 
-    /** Un intento exitoso ya registrado en pagos-logs. */
     public record IntentoExitoso(int intento, String referenciaExterna) {
     }
 
@@ -78,10 +71,7 @@ public class ControlPagosRepository {
                 entero(i, "intentosBase"));
     }
 
-    /**
-     * ¿Ya hay un intento EXITOSO en pagos-logs? Protege contra reenviar algo ya entregado cuando el mensaje
-     * se repite (RabbitMQ entrega al menos una vez) y el ítem todavía no llegó a ENVIADO.
-     */
+    /** Evita reenviar lo ya entregado cuando el mensaje se repite y el ítem aún no llegó a ENVIADO. */
     public Optional<IntentoExitoso> buscarExitoso(String pagoDestino) {
         return dynamo.query(QueryRequest.builder()
                         .tableName(tablaLogs)
@@ -117,7 +107,7 @@ public class ControlPagosRepository {
         }
         String detalle = DetalleError.resumir(respuesta.cuerpo(), DetalleError.MAX_DETALLE_LOG);
         if (detalle != null) {
-            item.put("detalle", AttributeValue.fromS(detalle));   // cuerpo de la respuesta, para saber qué falló
+            item.put("detalle", AttributeValue.fromS(detalle));
         }
         try {
             dynamo.putItem(PutItemRequest.builder()
@@ -130,7 +120,7 @@ public class ControlPagosRepository {
         }
     }
 
-    /** Fallo reintentable: el ítem sigue EN_COLA (el mensaje espera en su cola de espera). */
+    /** Fallo reintentable: el ítem sigue EN_COLA. */
     public void actualizarIntento(String pagoDestino, int intento, String ultimoError) {
         actualizar(pagoDestino, intento,
                 "SET intentos = :i, ultimoIntentoEn = :t, actualizadoEn = :t, ultimoError = :e",

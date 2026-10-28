@@ -2,6 +2,8 @@
 
 Feature 3 · Envío de pagos a sistemas externos. Define la colección de control, los estados de un pago y cómo se evita enviar el mismo pago dos veces. **El monolito no se modifica.**
 
+> **Estado:** diseño original (AQ-98) actualizado con lo que quedó implementado. Lo que cambió respecto al diseño se indica en el texto y se resume en la [sección 11](#11-estado-de-la-implementación).
+
 ## 1. Resumen
 
 - Cada pago registrado en el monolito se entrega a **dos destinos**: el banco y el ERP. Cada entrega se controla por separado.
@@ -42,10 +44,11 @@ Clave de partición: `pagoDestino` (String), por ejemplo `EQA-000123#BANCO`. Sin
 | `idempotencyKey` | S | Llave estable, p. ej. `EQA-000123` |
 | `payload` | S | Cuerpo exacto a enviar (JSON como texto); se guarda una vez |
 | `estado` | S | `PENDIENTE`, `EN_COLA`, `ENVIADO`, `FALLIDO` |
-| `intentos` | N | Cantidad de intentos de entrega |
-| `ultimoError` | S | Código del último error del destino |
+| `intentos` | N | Intentos de entrega en total; es la numeración de `pagos-logs` y nunca se reinicia |
+| `intentosBase` | N | Intentos que había al empezar la tanda actual; `POST /retry` lo iguala a `intentos` para dar 5 intentos nuevos |
+| `ultimoError` | S | Último error: código (o `HTTP_xxx`) más el cuerpo de la respuesta, en una línea y hasta 500 caracteres |
 | `referenciaExterna` | S | Comprobante que devolvió el destino |
-| `creadoEn`, `actualizadoEn`, `encoladoEn`, `enviadoEn` | S | Fechas ISO 8601 |
+| `creadoEn`, `actualizadoEn`, `encoladoEn`, `enviadoEn`, `ultimoIntentoEn` | S | Fechas ISO 8601 |
 
 Índice secundario `estado-actualizadoEn-index` (partición `estado`, orden `actualizadoEn`): sirve para encontrar los `PENDIENTE` y los `EN_COLA` atascados sin recorrer toda la tabla.
 
@@ -53,7 +56,7 @@ Un ítem especial `pagoDestino = "_CURSOR"` guarda `ultimoPagoId`, el último pa
 
 ### `pagos-logs`: un registro por intento
 
-Clave de partición `pagoDestino` (S), clave de ordenamiento `intento` (N). Atributos: `resultado` (`EXITOSO` o `FALLIDO`), `httpStatus`, `codigoError`, `reintentable` (BOOL), `referenciaExterna`, `duracionMs`, `registradoEn`.
+Clave de partición `pagoDestino` (S), clave de ordenamiento `intento` (N). Atributos: `resultado` (`EXITOSO` o `FALLIDO`), `httpStatus`, `codigoError`, `reintentable` (BOOL), `referenciaExterna`, `duracionMs`, `registradoEn` y `detalle` (cuerpo de la respuesta, hasta 1000 caracteres).
 
 Es el "DynamoDB Logs" del diagrama: solo se agrega, nunca se modifica.
 
@@ -65,7 +68,7 @@ stateDiagram-v2
     PENDIENTE --> EN_COLA: reclamado y publicado en RabbitMQ
     EN_COLA --> ENVIADO: el destino responde 201 o 409 de duplicado
     EN_COLA --> FALLIDO: error sin reintento o se agotan los reintentos
-    EN_COLA --> EN_COLA: sin resultado tras 15 min, se vuelve a publicar
+    EN_COLA --> EN_COLA: sin resultado tras 15 min, se vuelve a publicar (no implementado)
     FALLIDO --> PENDIENTE: reintento manual (POST /retry)
     ENVIADO --> [*]
 ```
@@ -83,26 +86,25 @@ El pago está completamente transmitido cuando sus dos ítems están en `ENVIADO
 
 | Actor | Escribe |
 |---|---|
-| Producer | Crea los ítems `PENDIENTE`; pasa a `EN_COLA` al publicar; vuelve a publicar los `EN_COLA` vencidos |
-| Consumer | Registra cada intento en `pagos-logs`; actualiza `intentos` y `ultimoError`; marca `FALLIDO` |
-| Función aparte: Lambda en AWS, proceso programado en local | Toma los éxitos de `pagos-logs` y pasa `EN_COLA` → `ENVIADO` (la marca de "pago enviado" del diagrama) |
+| Producer | Crea los ítems `PENDIENTE` y pasa a `EN_COLA` al publicar (volver a publicar los `EN_COLA` vencidos está pendiente) |
+| Consumer | Registra cada intento en `pagos-logs`; actualiza `intentos` y `ultimoError`; marca `ENVIADO` (con el comprobante) o `FALLIDO` |
 | API `/retry` | `FALLIDO` → `PENDIENTE` |
 
 Todos los cambios de estado son escrituras condicionales: por ejemplo, pasar a `ENVIADO` solo funciona si el estado actual es `EN_COLA`.
 
-**La función aparte, en local:** cada 30 segundos consulta el índice por `estado = EN_COLA`; para cada ítem busca en `pagos-logs` un registro `EXITOSO` y, si existe, lo pasa a `ENVIADO` guardando `referenciaExterna` y `enviadoEn`. En AWS lo mismo lo haría una Lambda activada por DynamoDB Streams sobre `pagos-logs`.
+**Cambio respecto al diseño original:** no hay una función aparte (Lambda o proceso programado). El consumer hace `EN_COLA` → `ENVIADO` con una escritura condicional justo después de registrar el éxito. Es más simple de operar y mantiene la garantía, porque la transición es atómica.
 
 ## 5. Cómo se evita enviar el mismo pago dos veces
 
 **La regla es por destino:** el pago 123 puede ir una vez al banco y una vez al ERP, pero nunca dos veces al mismo. Por eso la unidad de control es la pareja (pago, destino).
 
-RabbitMQ garantiza entrega **al menos una vez**, así que un mensaje repetido es posible. **Caso "el mensaje se reprocesa":** el consumer recibe otra vez el mensaje de un pago ya entregado. Antes de llamar al destino lee su ítem en `pagos-control`: si está en `ENVIADO`, descarta el mensaje con *ack* sin llamar a nadie. Si por una carrera igual llega a llamar, el destino responde `409` de duplicado y se trata como éxito. Las capas son:
+RabbitMQ garantiza entrega **al menos una vez**, así que un mensaje repetido es posible. **Caso "el mensaje se reprocesa":** el consumer recibe otra vez el mensaje de un pago ya entregado. Antes de llamar al destino lee su ítem en `pagos-control`: si está en `ENVIADO` o `FALLIDO`, o si `pagos-logs` ya tiene un intento exitoso, descarta el mensaje con *ack* sin llamar a nadie. Si por una carrera igual llega a llamar, el destino responde `409` de duplicado y se trata como éxito. Las capas son:
 
 1. **Un ítem por (pago, destino).** Se crea con `PutItem` y la condición `attribute_not_exists(pagoDestino)`: si ya existe, falla sin duplicar.
 2. **Reclamar antes de publicar.** Solo se publican los `PENDIENTE`, y el paso a `EN_COLA` es un `UpdateItem` con la condición `estado = PENDIENTE`. Si dos corridas coinciden, solo una gana cada ítem.
 3. **Llave de idempotencia estable.** `<EQUIPO>-<pago_id con 6 dígitos>` (p. ej. `EQA-000123`), calculada una vez y reutilizada en todos los reintentos. Nunca se genera una llave nueva por intento.
 4. **Cuerpo idéntico en cada reintento.** El banco y el ERP responden `409` con `IDEMPOTENCY_KEY_REUSED` / `DOCUMENTO_REUTILIZADO` si la misma llave llega con datos distintos. Por eso el cuerpo se guarda en `payload` al crear el ítem y los reintentos lo envían tal cual, aunque el pago cambie después. La fecha enviada es `pagos.fecha_pago`, nunca la hora actual.
-5. **Los destinos también son idempotentes.** Un `409` con `DUPLICATE_PAYMENT` / `DOCUMENTO_DUPLICADO` (mismos datos) significa que ya estaba entregado: se trata como éxito.
+5. **Los destinos también son idempotentes.** Un `409` con `DUPLICATE_PAYMENT` / `DOCUMENTO_DUPLICADO` (mismos datos) significa que ya estaba entregado: se trata como éxito y se guarda como `referenciaExterna` el comprobante original que viene en esa respuesta.
 
 El registro de cada intento en `pagos-logs` es también idempotente: se escribe con la condición `attribute_not_exists(pagoDestino)` sobre la clave (`pagoDestino`, `intento`), así que reprocesar el mismo intento no crea un registro doble.
 
@@ -114,15 +116,17 @@ Reglas tomadas de los specs del docente (iguales para el banco y el ERP):
 
 | Respuesta | Qué hace el consumer | Estado |
 |---|---|---|
-| 201 | Registra el éxito y el comprobante | `ENVIADO` (lo confirma la función aparte) |
-| 409 duplicado | Ya estaba entregado | `ENVIADO` |
+| 201 | Registra el éxito y el comprobante | `ENVIADO` |
+| 409 duplicado | Ya estaba entregado; guarda el comprobante original | `ENVIADO` |
 | 409 llave reutilizada | Error del productor, no reintenta; dead-letter | `FALLIDO` |
 | 400, 403, 422 | No reintenta; dead-letter | `FALLIDO` |
 | 429, 500, 502, 503, 504, timeout | Reintenta con espera creciente; respeta `Retry-After` si viene | `EN_COLA` |
 
-Espera propuesta: 5 intentos en total, con esperas de 2, 4, 8 y 16 segundos más un poco de variación aleatoria. Timeouts: conexión 2 s, lectura 3 s. El `429` del gateway puede venir sin `Retry-After`; en ese caso se usa la espera propia.
+Implementación: 5 intentos por tanda, con esperas de 2, 4, 8 y 16 segundos entre ellos (sin variación aleatoria, porque cada escalón es una cola con TTL fijo). Si el destino manda `Retry-After`, se usa el escalón que lo cubre (hasta 32 s). Timeouts: conexión 2 s, lectura 3 s. El `429` del gateway puede venir sin `Retry-After`; en ese caso se usa la espera propia.
 
 Hay una cola por destino (`pagos.banco`, `pagos.erp`) y un mensaje por destino, para que la caída de uno no frene al otro.
+
+**Colas de espera.** Una por destino y por escalón (`pagos.banco.retry.2s`, `.4s`, `.8s`, `.16s`, `.32s`; lo mismo para el ERP), sin consumidor y cada una con su TTL fijo y dead-letter hacia la cola principal: al vencer, RabbitMQ devuelve el mensaje solo. Se usa una cola por escalón porque, con un TTL distinto por mensaje en una sola cola, RabbitMQ solo expira el mensaje que está al frente y uno de 16 s retrasaría a uno de 2 s. Las colas principales no cambian de argumentos, para no chocar con las que declara el producer.
 
 ### Si un simulador está caído: el pago no se pierde
 
@@ -130,14 +134,14 @@ La cola es el seguro: el mensaje no se descarta hasta que el destino responde o 
 
 **Caso 1: la caída es corta, queda reintentando.**
 - El destino responde `503`, `504`, `429` o no contesta (timeout).
-- El consumer no da el mensaje por entregado: lo manda a una cola de espera (`pagos.banco.retry` o `pagos.erp.retry`) con un retardo creciente, y vuelve a la cola principal.
+- El consumer no da el mensaje por entregado: lo manda a la cola de espera del escalón que toca (`pagos.banco.retry.2s`, `.4s`...) y de ahí vuelve solo a la cola principal.
 - El ítem sigue en `EN_COLA`, con `intentos` y `ultimoError` actualizados y un registro `FALLIDO` en `pagos-logs` por cada vuelta.
 - Si el destino se recupera dentro de los intentos permitidos, responde `201` y el pago termina en `ENVIADO`.
 
 **Caso 2: la caída es larga o el error es definitivo, va a la cola de fallidos.**
 - Se agotan los 5 intentos, o llega un error que no se reintenta (`400`, `403`, `422`, llave reutilizada).
 - El mensaje pasa a la *dead-letter queue* (`pagos.dlq`) con el motivo, y el ítem queda en `FALLIDO`.
-- **El pago no se pierde:** sigue en `pagos-control` con su `payload` y su llave intactos. Cuando el simulador vuelva, `POST /api/v1/payments/transmissions/{paymentId}/retry` lo pasa a `PENDIENTE` y se reenvía con la misma llave, sin riesgo de duplicado.
+- **El pago no se pierde:** sigue en `pagos-control` con su `payload` y su llave intactos. Cuando el simulador vuelva, `POST /api/v1/payments/transmissions/{paymentId}/retry` lo pasa a `PENDIENTE`, reinicia la tanda de intentos (`intentosBase`) y lo publica de inmediato con la misma llave y el mismo payload, sin riesgo de duplicado. El mensaje original queda en `pagos.dlq` como registro; se puede purgar desde RabbitMQ.
 - Los errores definitivos del tipo `422` no se arreglan reintentando: hay que corregir el dato y recién entonces reintentar.
 
 ## 7. Cómo encuentra el producer lo pendiente
@@ -161,53 +165,74 @@ La cola es el seguro: el mensaje no se descarta hasta que el destino responde o 
    LIMIT :limite;
    ```
    La consulta retrocede unos 100 ids bajo el cursor para no saltarse pagos que se confirmen tarde en la réplica; los repetidos se descartan en el paso siguiente.
-2. **Crear el control:** por cada pago, el producer arma los dos `payload` y crea los dos ítems (`BANCO` y `ERP`) con `PutItem` condicional (o una transacción de dos escrituras). Después actualiza `_CURSOR`.
+2. **Crear el control:** por cada pago, el producer arma los dos `payload` y crea los dos ítems (`BANCO` y `ERP`) con `PutItem` condicional. Si un pago falla al armarse, no bloquea a los demás y el cursor no avanza más allá de él. Después actualiza `_CURSOR`.
 3. **Reclamar y publicar:** consulta el índice por `estado = PENDIENTE`, pasa cada ítem a `EN_COLA` con la condición y publica el mensaje `{ pagoId, destino, idempotencyKey }` con confirmación.
-4. **Recuperar atascados:** los `EN_COLA` con `actualizadoEn` de hace más de 15 minutos se vuelven a publicar. Es seguro por las capas 3 a 5.
+4. **Recuperar atascados (no implementado):** los `EN_COLA` con `actualizadoEn` de hace más de 15 minutos se vuelven a publicar. Es seguro por las capas 3 a 5.
 
-Si el producer se cae después de reclamar y antes de publicar, el ítem queda `EN_COLA` sin mensaje: el paso 4 lo recupera. Si publica dos veces, el mensaje se duplica pero el pago no, por la capa 5.
+Si el producer se cae después de reclamar y antes de publicar, el ítem queda `EN_COLA` sin mensaje: el paso 4 lo recuperaría (pendiente). Si publica dos veces, el mensaje se duplica pero el pago no, por la capa 5.
 
 ## 8. Datos que se envían
 
-| Campo del destino | Origen en el monolito | Nota |
+Los payloads siguen los contratos del docente (`BankPaymentRequest` y `ErpRegistroPago`) y se validaron contra sus esquemas.
+
+| Campo del destino | Origen | Nota |
 |---|---|---|
-| Banco `amount.valueInCents` | `pagos.monto` × 100 | Con `BigDecimal`, nunca `double` |
-| ERP `total` y `detalle[].monto` | `pagos.monto` como texto con 2 decimales | `detalle` debe sumar el `total` |
-| ERP rubro `AGUA_POTABLE` | `recibos.monto` | |
-| ERP rubro `MORA` | `pagos.monto` − `recibos.monto` | Solo si es mayor que cero |
-| Fecha de pago | `pagos.fecha_pago` | Enviar con zona horaria de Guatemala (−06:00) |
-| Canal (banco) / forma de pago (ERP) | `metodos_pago.nombre` | Tabla de equivalencias en configuración |
+| Banco `teamCode` / ERP `equipo` | variable `TEAM_CODE` | `EQUIPO_A`...; debe coincidir con la API key |
+| Banco `payer.customerCode` / ERP `contribuyente.codigo_cliente` | `CLI-` + `clientes.id` con 4 dígitos | |
+| Banco `payer.fullName` | `clientes.nombre` | Opcional; máximo 150 caracteres. No se envía NIT ni DPI |
+| Banco `amount.valueInCents` y `currency` | `pagos.monto` × 100 y `GTQ` | Con `BigDecimal`, nunca `double` |
+| Banco `transactionDate` / ERP `fecha_pago` | `pagos.fecha_pago` | Con zona horaria de Guatemala (−06:00); nunca la hora actual |
+| Banco `channel` / ERP `forma_pago` | `metodos_pago.nombre` | Banco: `CASH`, `CARD`, `BANK_TRANSFER`, `CHECK`. ERP: el nombre en mayúsculas |
+| Banco `description` | `Servicio de agua` + período | |
+| ERP `documento_origen` | `tipo` según el método, `numero` = llave, `fecha_emision` = fecha del pago | |
 | ERP `contribuyente.codigo_contador` | `contadores.numero_registro` | |
 | ERP `periodo_fiscal` | `lecturas.periodo` (año y mes) | |
-| Llave / `documento_origen.numero` | `idempotencyKey` | Cumple el patrón `^[A-Za-z0-9_-]+$` |
+| ERP `total` y `detalle[]` | `AGUA_POTABLE` = menor entre recibo y pago; `MORA` = el resto si es mayor que cero | `detalle` siempre suma el `total` |
+| Llave de idempotencia | `Idempotency-Key` (banco) y `documento_origen.numero` (ERP) | Cumple `^[A-Za-z0-9_-]+$` |
 
-Equivalencias de forma de pago propuestas: `EFECTIVO` → `CASH`, `TARJETA` → `CARD`, `TRANSFERENCIA` → `BANK_TRANSFER`, `CHEQUE` → `CHECK`.
+Equivalencias de forma de pago: `EFECTIVO` → `CASH` y `RECIBO_CAJA`, `TARJETA` → `CARD` y `VOUCHER_TARJETA`, `TRANSFERENCIA` → `BANK_TRANSFER` y `BOLETA_DEPOSITO`, `CHEQUE` → `CHECK` y `RECIBO_CAJA`.
 
-## 9. Decisiones abiertas
-
-Las propongo yo y conviene confirmarlas con Marvin (la 1 ya está resuelta):
+## 9. Decisiones del diseño y su estado
 
 1. **Dónde vive la bandera: resuelto.** El docente permite tocar la base, pero se mantiene DynamoDB porque la réplica es de solo lectura y los microservicios no escriben en la base del monolito.
-2. **Pagos con cheque:** el banco responde `422 UNSUPPORTED_CHANNEL` a `CHECK`. ¿Se omite el banco para esos pagos o se dejan en `FALLIDO`?
-3. **Límites del banco:** más de Q25,000.00 por pago o una fecha más de 5 minutos en el futuro dan `422`. Esos pagos terminarían en `FALLIDO`.
-4. **Pagos antiguos:** el ERP rechaza períodos con más de 12 meses (`PERIODO_CERRADO`). Por eso existe el parámetro `:desde`; para la demo, usar datos recientes.
-5. **Códigos de cliente** (`customerCode`, `codigo_cliente`): el monolito no tiene un código con ese formato. Propuesta: `CLI-` más el id con 4 dígitos.
-6. **Datos personales:** el DPI es opcional en ambos destinos (`taxId`, `nit`). Propongo no enviarlo.
-7. **`documento_origen.tipo` del ERP** (`RECIBO_CAJA`, `BOLETA_DEPOSITO`, `VOUCHER_TARJETA`): por los nombres, `EFECTIVO` → `RECIBO_CAJA`, `TRANSFERENCIA` → `BOLETA_DEPOSITO`, `TARJETA` → `VOUCHER_TARJETA`. Falta definir el caso `CHEQUE`.
-8. **Versión de Spring Cloud para Feign:** hay que confirmar cuál es compatible con Spring Boot 4.1.1 (ver [`feign-clientes.md`](feign-clientes.md)).
+2. **Pagos con cheque: resuelto.** Se envían a los dos destinos. El banco responde `422 UNSUPPORTED_CHANNEL` y el ítem queda `FALLIDO`; el ERP sí acepta `CHEQUE`.
+3. **Límites del banco: sin cambios.** Más de Q25,000.00 por pago o una fecha más de 5 minutos en el futuro dan `422`; esos pagos terminan en `FALLIDO`.
+4. **Pagos antiguos: resuelto con `PAGOS_DESDE`.** El ERP rechaza períodos con más de 12 meses (`PERIODO_CERRADO`). Si no se define, el producer arranca en 1970 y procesa todos los pagos; para la demo se usa `2026-09-19`.
+5. **Códigos de cliente: resuelto.** `CLI-` más el id con 4 dígitos (por ejemplo `CLI-0007`).
+6. **Datos personales: resuelto.** No se envía DPI ni NIT (son opcionales en ambos destinos).
+7. **`documento_origen.tipo` del ERP: resuelto.** `EFECTIVO` → `RECIBO_CAJA`, `TRANSFERENCIA` → `BOLETA_DEPOSITO`, `TARJETA` → `VOUCHER_TARJETA`, `CHEQUE` → `RECIBO_CAJA`.
+8. **Versión de Spring Cloud para Feign: resuelto.** 2025.1.3 con Spring Boot 4.1.1 (ver [`feign-clientes.md`](feign-clientes.md)).
 
 ## 10. Configuración local
 
-Variables de entorno (ver `.env.example`):
+Variables de entorno (ver `.env.example`; los valores reales nunca van al repositorio):
 
-| Variable | Valor local |
-|---|---|
-| `DYNAMODB_ENDPOINT` | `http://localhost:8012` (dentro de Docker: `http://dynamodb-pagos:8000`) |
-| `DYNAMODB_TABLE_CONTROL` | `pagos-control` |
-| `DYNAMODB_TABLE_LOGS` | `pagos-logs` |
-| `AWS_REGION` | `us-east-1` |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `local` (solo para desarrollo) |
-| `DB_REPLICA_HOST`, `DB_REPLICA_PORT` | `localhost`, `3307` |
-| `DB_LECTURA_USER`, `DB_LECTURA_PASSWORD` | Las de `oficina-agua-infra/.env` |
+| Variable | Servicio | Valor / descripción |
+|---|---|---|
+| `DYNAMODB_ENDPOINT` | ambos | `http://localhost:8012` (dentro de Docker: `http://dynamodb-pagos:8000`) |
+| `DYNAMODB_TABLE_CONTROL`, `DYNAMODB_TABLE_LOGS` | ambos | `pagos-control`, `pagos-logs` |
+| `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | ambos | `us-east-1`, `local`, `local` (solo desarrollo) |
+| `RABBITMQ_USER`, `RABBITMQ_PASSWORD` | ambos | Los de `.env` |
+| `DB_REPLICA_HOST`, `DB_REPLICA_PORT`, `DB_REPLICA_NAME` | producer | `localhost`, `3307`, `oficina_agua` |
+| `DB_LECTURA_USER`, `DB_LECTURA_PASSWORD` | producer | Las de `oficina-agua-infra/.env` |
+| `TEAM_CODE`, `PAGOS_EQUIPO` | producer | `EQUIPO_A` y el prefijo de la llave (`EQA`) |
+| `PAGOS_DESDE` | producer | Fecha mínima de los pagos (`yyyy-MM-dd`); si no se define, 1970 |
+| `BANK_BASE_URL`, `ERP_BASE_URL` | consumer | URL base de los simuladores |
+| `BANK_API_KEY`, `ERP_API_KEY` | consumer | Llave `x-api-key` entregada por el docente |
+| `BANK_SIMULATION_SCENARIO`, `ERP_SIMULATION_SCENARIO` | consumer | Solo pruebas: fuerza un escenario del simulador |
 
 En AWS se omite `DYNAMODB_ENDPOINT` y se usan las credenciales de la cuenta.
+
+## 11. Estado de la implementación
+
+| Tarea | Qué quedó |
+|---|---|
+| AQ-120 | Producer: detecta pagos nuevos, crea los ítems, reclama y publica con confirmación |
+| AQ-121 | Consumer: envía al banco y al ERP con ack manual y registra cada intento |
+| AQ-128 | URL real y autenticación por variables de entorno; no se envían campos opcionales en `null` |
+| AQ-129 | Colas de espera por escalón, `pagos.dlq`, estados `ENVIADO` y `FALLIDO`, y `POST /retry` |
+| AQ-142 | Prueba guiada de pagos fallidos (reintento, dead-letter y reenvío) |
+
+**Cambios respecto al diseño original:** el consumer marca `ENVIADO` (no hay función aparte); las esperas son una cola por escalón y sin variación aleatoria; el reintento manual reinicia la tanda con `intentosBase`.
+
+**Pendiente:** recuperar los `EN_COLA` vencidos, y las operaciones `listTransmissions` y `dispatchPendingPayments` del contrato (responden `501`).

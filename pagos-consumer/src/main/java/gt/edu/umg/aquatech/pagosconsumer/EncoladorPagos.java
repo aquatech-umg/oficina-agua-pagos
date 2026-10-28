@@ -10,9 +10,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Manda mensajes a las colas de espera y a pagos.dlq. Mensajes persistentes y con publisher confirms:
- * si RabbitMQ no confirma lanza excepción, y entonces el listener NO hace ack del mensaje original
- * (no se pierde el pago). Requiere spring.rabbitmq.publisher-confirm-type=correlated.
+ * Publica en las colas de espera y en pagos.dlq con mensajes persistentes y confirmación del broker.
+ * Si RabbitMQ no confirma lanza excepción y el listener no hace ack (no se pierde el pago).
  */
 @Component
 public class EncoladorPagos {
@@ -52,7 +51,7 @@ public class EncoladorPagos {
 
     private void publicar(String cola, Message mensaje) {
         rabbit.invoke(operaciones -> {
-            operaciones.send("", cola, mensaje);              // exchange por defecto -> cola
+            operaciones.send("", cola, mensaje);
             operaciones.waitForConfirmsOrDie(TIMEOUT_CONFIRMACION_MS);
             return null;
         });

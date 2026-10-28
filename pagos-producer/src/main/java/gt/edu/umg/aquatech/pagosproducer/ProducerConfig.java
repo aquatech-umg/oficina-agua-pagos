@@ -19,8 +19,8 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClientBuilder;
 public class ProducerConfig {
 
     /**
-     * Colas durables. El consumer las declara IGUAL: si los argumentos difieren, RabbitMQ responde
-     * PRECONDITION_FAILED. Cuando el sprint 9 agregue dead-letter, hay que borrar y recrear las colas.
+     * Colas durables; el consumer las declara igual (si los argumentos difieren,
+     * RabbitMQ responde PRECONDITION_FAILED).
      */
     @Bean
     Queue colaBanco() {
@@ -32,7 +32,7 @@ public class ProducerConfig {
         return QueueBuilder.durable(Destino.ERP.cola()).build();
     }
 
-    /** Local: DYNAMODB_ENDPOINT=http://localhost:8012. En AWS se omite el endpoint. */
+    /** El endpoint solo se define en local (DynamoDB Local). */
     @Bean
     DynamoDbClient dynamoDbClient(
             @Value("${DYNAMODB_ENDPOINT:}") String endpoint,

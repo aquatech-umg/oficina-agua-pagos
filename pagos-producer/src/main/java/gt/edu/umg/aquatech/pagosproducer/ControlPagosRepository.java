@@ -19,8 +19,8 @@ import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 /**
- * Tabla pagos-control (sección 3 del diseño). Todas las transiciones que hace el producer son
- * escrituras condicionales: PENDIENTE (crear) y PENDIENTE -> EN_COLA (reclamar).
+ * Tabla pagos-control. Las transiciones del producer son escrituras condicionales: crear PENDIENTE
+ * y reclamar PENDIENTE -> EN_COLA.
  */
 @Component
 public class ControlPagosRepository {
@@ -39,7 +39,6 @@ public class ControlPagosRepository {
         this.tabla = tabla;
     }
 
-    // ---- cursor ---------------------------------------------------------------------------
 
     /** Último pago del monolito ya procesado; 0 si todavía no existe el ítem _CURSOR. */
     public long leerCursor() {
@@ -71,7 +70,6 @@ public class ControlPagosRepository {
         }
     }
 
-    // ---- crear ítems ----------------------------------------------------------------------
 
     /**
      * PutItem condicional: si ya existe el ítem (pago, destino) no lo toca, así el payload queda
@@ -101,7 +99,6 @@ public class ControlPagosRepository {
         }
     }
 
-    // ---- publicar -------------------------------------------------------------------------
 
     /** Ítems PENDIENTE, vía el índice estado-actualizadoEn-index (no recorre la tabla). */
     public List<Map<String, AttributeValue>> pendientes(int limite) {
@@ -160,7 +157,6 @@ public class ControlPagosRepository {
         }
     }
 
-    // ---- consulta y reintento manual -------------------------------------------------------
 
     /** Lectura consistente de un ítem (pago, destino), o null si no existe. */
     public Map<String, AttributeValue> leer(String pagoDestino) {
@@ -198,7 +194,6 @@ public class ControlPagosRepository {
         }
     }
 
-    // ---- utilidades -----------------------------------------------------------------------
 
     private static String pagoDestino(String idempotencyKey, Destino destino) {
         return idempotencyKey + "#" + destino.name();

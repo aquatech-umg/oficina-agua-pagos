@@ -6,10 +6,12 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:admin}
     password: ${RABBITMQ_PASSWORD:changeme}
+    # Necesario para publicar en las colas de espera y en pagos.dlq con confirmación
     publisher-confirm-type: correlated
     listener:
       simple:
         prefetch: 1
+  # Los simuladores rechazan campos opcionales en null (ej. payer.taxId): no se envían
   jackson:
     default-property-inclusion: non_null
   cloud:
@@ -20,6 +22,7 @@ spring:
             connect-timeout: 2000
             read-timeout: 3000
 
+# Clientes Feign generados: name es obligatorio (el contextId lo usa por defecto)
 bankPayments:
   name: bankPayments
   url: ${BANK_BASE_URL:https://gdsi5lyj34.execute-api.us-east-1.amazonaws.com/prod}

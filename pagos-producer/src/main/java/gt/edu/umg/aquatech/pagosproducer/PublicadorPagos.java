@@ -9,9 +9,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Publica un mensaje por destino en su cola. Mensaje persistente y con publisher confirms:
- * si RabbitMQ no confirma, lanza excepción y el ítem se devuelve a PENDIENTE.
- * Requiere spring.rabbitmq.publisher-confirm-type=correlated.
+ * Publica un mensaje por destino con persistencia y confirmación del broker;
+ * si RabbitMQ no confirma lanza excepción.
  */
 @Component
 public class PublicadorPagos {
@@ -26,7 +25,6 @@ public class PublicadorPagos {
 
     public void publicar(Destino destino, long pagoId, String idempotencyKey) {
         // El cuerpo solo lleva la referencia: el payload completo vive en pagos-control.
-        // idempotencyKey cumple ^[A-Za-z0-9_-]+$ y destino es un enum: no hace falta escapar.
         String json = "{\"pagoId\":%d,\"destino\":\"%s\",\"idempotencyKey\":\"%s\"}"
                 .formatted(pagoId, destino.name(), idempotencyKey);
         Message mensaje = MessageBuilder.withBody(json.getBytes(StandardCharsets.UTF_8))
@@ -35,7 +33,7 @@ public class PublicadorPagos {
                 .build();
 
         rabbit.invoke(operaciones -> {
-            operaciones.send("", destino.cola(), mensaje);          // exchange por defecto -> cola
+            operaciones.send("", destino.cola(), mensaje);
             operaciones.waitForConfirmsOrDie(TIMEOUT_CONFIRMACION_MS);
             return null;
         });

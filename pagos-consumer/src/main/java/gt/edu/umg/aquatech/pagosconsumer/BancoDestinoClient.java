@@ -10,10 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
-/**
- * Envía el pago al banco con el cliente Feign generado desde bank-payments-api.yaml.
- * La llave de idempotencia va en el header Idempotency-Key (POST /bank/v1/payments).
- */
+/** Envía el pago al banco con el cliente Feign generado; la llave va en el header Idempotency-Key. */
 @Component
 public class BancoDestinoClient implements DestinoClient {
 
@@ -23,8 +20,7 @@ public class BancoDestinoClient implements DestinoClient {
 
     public BancoDestinoClient(BankPaymentsApiClient api,
                               JsonMapper mapper,
-                              // Solo para pruebas: fuerza SUCCESS, TIMEOUT, LOST_ACK, ERROR_503, RATE_LIMIT...
-                              // Vacío = comportamiento normal del simulador (AUTO).
+                              // Solo pruebas: fuerza un escenario del simulador; vacío = comportamiento normal.
                               @Value("${BANK_SIMULATION_SCENARIO:}") String escenario) {
         this.api = api;
         this.mapper = mapper;
@@ -40,7 +36,7 @@ public class BancoDestinoClient implements DestinoClient {
     public RespuestaDestino enviar(String payloadJson, String idempotencyKey) {
         try {
             BankPaymentRequest solicitud = mapper.readValue(payloadJson, BankPaymentRequest.class);
-            // X-Correlation-Id = la misma llave: se puede rastrear el pago en el banco de punta a punta.
+            // La misma llave como X-Correlation-Id permite rastrear el pago en el banco.
             ResponseEntity<BankPaymentReceipt> respuesta =
                     api.sendBankPayment(idempotencyKey, solicitud, idempotencyKey, escenario);
             BankPaymentReceipt comprobante = respuesta.getBody();

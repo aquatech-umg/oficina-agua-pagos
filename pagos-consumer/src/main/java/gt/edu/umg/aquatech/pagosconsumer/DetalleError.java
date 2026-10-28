@@ -1,14 +1,12 @@
 package gt.edu.umg.aquatech.pagosconsumer;
 
 /**
- * Texto de error que se guarda para no tener que adivinar qué falló: el código (o HTTP_xxx) más el cuerpo
- * que devolvió el destino, en una sola línea y con un tope de largo. Lógica pura, sin Spring.
- *
- * Ejemplo de ultimoError: {@code HTTP_400: {"code":"VALIDATION_ERROR","message":"payer.taxId ..."}}
+ * Texto de error que se guarda para no adivinar qué falló: código (o HTTP_xxx) más el cuerpo del destino,
+ * en una sola línea y con tope de largo.
  */
 public final class DetalleError {
 
-    /** Largo máximo del detalle en pagos-control.ultimoError (lo que ven ver-control y el GET de la API). */
+    /** Largo máximo del detalle en pagos-control.ultimoError. */
     static final int MAX_ULTIMO_ERROR = 500;
 
     /** Largo máximo del cuerpo guardado en cada fila de pagos-logs. */

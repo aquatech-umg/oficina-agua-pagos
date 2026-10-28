@@ -10,11 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
-/**
- * Registra el pago en el ERP con el cliente Feign generado desde erp-payments-api.yaml
- * (POST /erp/v1/pagos). El ERP no tiene header de idempotencia: la unicidad va en el cuerpo,
- * documento_origen.numero, que el producer ya dejó igual a la llave.
- */
+/** Registra el pago en el ERP con el cliente Feign generado; la unicidad va en documento_origen.numero. */
 @Component
 public class ErpDestinoClient implements DestinoClient {
 
@@ -24,7 +20,7 @@ public class ErpDestinoClient implements DestinoClient {
 
     public ErpDestinoClient(ErpPagosApiClient api,
                             JsonMapper mapper,
-                            // Solo para pruebas; vacío = comportamiento normal del simulador (AUTO).
+                            // Solo pruebas: fuerza un escenario del simulador; vacío = comportamiento normal.
                             @Value("${ERP_SIMULATION_SCENARIO:}") String escenario) {
         this.api = api;
         this.mapper = mapper;

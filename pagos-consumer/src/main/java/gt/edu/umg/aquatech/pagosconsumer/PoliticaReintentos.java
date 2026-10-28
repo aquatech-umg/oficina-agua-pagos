@@ -3,17 +3,10 @@ package gt.edu.umg.aquatech.pagosconsumer;
 import java.util.List;
 
 /**
- * Qué hacer con un pago cuyo envío falló (sección 6 del diseño). Lógica pura, sin Spring.
- *
- * <ul>
- *   <li>Error definitivo (400, 403, 422, 409 de llave reutilizada): dead-letter y FALLIDO, sin reintentar.</li>
- *   <li>Error transitorio (429, 500, 502, 503, 504, timeout): 5 intentos en total por tanda, con esperas de
- *       2, 4, 8 y 16 segundos entre ellos. Si el destino manda Retry-After se espera al menos eso.</li>
- *   <li>Al agotar los intentos: dead-letter y FALLIDO.</li>
- * </ul>
- *
- * La espera se hace con una cola por escalón (cada una con su TTL fijo): así un mensaje de 2 s nunca queda
- * detrás de uno de 16 s, cosa que sí pasa con un TTL distinto por mensaje dentro de la misma cola.
+ * Qué hacer con un pago cuyo envío falló. Un error definitivo va al dead-letter; uno transitorio se reintenta
+ * hasta 5 veces con esperas de 2, 4, 8 y 16 s (o el Retry-After del destino); al agotarse va al dead-letter.
+ * La espera usa una cola por escalón, cada una con su TTL fijo: con TTL distinto por mensaje en una sola cola,
+ * uno de 16 s bloquearía a uno de 2 s que esté detrás.
  */
 public final class PoliticaReintentos {
 
@@ -27,16 +20,13 @@ public final class PoliticaReintentos {
     public static final List<Integer> ESCALONES_SEGUNDOS = List.of(2, 4, 8, 16, 32);
 
     public enum Accion {
-        /** Mandar el mensaje a la cola de espera y reintentar luego. */
         ESPERAR,
-        /** Mandar el mensaje a pagos.dlq y marcar el ítem FALLIDO. */
         DEAD_LETTER
     }
 
     /**
-     * @param accion          qué hacer
-     * @param esperaSegundos  escalón de la cola de espera (0 si la acción es DEAD_LETTER)
-     * @param motivo          para pagos.dlq: por qué se rindió (null si se espera)
+     * @param esperaSegundos escalón de la cola de espera (0 si va al dead-letter)
+     * @param motivo         razón del dead-letter (null si se espera)
      */
     public record Decision(Accion accion, int esperaSegundos, String motivo) {
     }
@@ -44,11 +34,7 @@ public final class PoliticaReintentos {
     private PoliticaReintentos() {
     }
 
-    /**
-     * @param resultado        clasificación de la respuesta (debe ser un fallo)
-     * @param intentoEnTanda   número de intento dentro de la tanda actual, empezando en 1
-     * @param retryAfter       segundos que pidió el destino, o null
-     */
+    /** {@code intentoEnTanda} empieza en 1; {@code retryAfter} son los segundos que pidió el destino, o null. */
     public static Decision decidirTrasFallo(Resultado resultado, int intentoEnTanda, Integer retryAfter) {
         if (resultado.esExito()) {
             throw new IllegalArgumentException("Un éxito no necesita política de reintentos");

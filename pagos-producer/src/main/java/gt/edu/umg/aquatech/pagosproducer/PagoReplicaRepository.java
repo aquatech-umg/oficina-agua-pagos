@@ -7,11 +7,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 
-/** Solo lectura sobre la réplica. Nunca escribe en MySQL. */
+/** Solo lectura sobre la réplica: nunca escribe. */
 @Component
 public class PagoReplicaRepository {
 
-    // Consulta de la sección 7 del diseño.
     private static final String SQL = """
             SELECT p.id, p.monto, p.fecha_pago, p.referencia,
                    m.nombre AS metodo_pago,

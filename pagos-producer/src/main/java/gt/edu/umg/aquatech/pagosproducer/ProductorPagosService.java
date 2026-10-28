@@ -60,7 +60,6 @@ public class ProductorPagosService {
         }
     }
 
-    /** Devuelve cuántos ítems de control creó (dos por cada pago nuevo). */
     public int detectarNuevos() {
         long cursor = control.leerCursor();
         List<PagoReplica> pagos = replica.nuevos(Math.max(0, cursor - RETROCESO_IDS), desde, lote);
@@ -94,7 +93,6 @@ public class ProductorPagosService {
         return creados;
     }
 
-    /** Devuelve cuántos mensajes publicó y confirmó RabbitMQ. */
     public int publicarPendientes() {
         int publicados = 0;
         for (Map<String, AttributeValue> item : control.pendientes(lote)) {
@@ -119,7 +117,7 @@ public class ProductorPagosService {
         long pagoId = Long.parseLong(llave.substring(llave.lastIndexOf('-') + 1));
 
         if (!control.reclamar(pagoDestino)) {
-            return false;   // otra corrida ya lo reclamó: no se publica de nuevo
+            return false;
         }
         try {
             publicador.publicar(destino, pagoId, llave);

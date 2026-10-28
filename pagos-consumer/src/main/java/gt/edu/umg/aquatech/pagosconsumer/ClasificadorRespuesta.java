@@ -3,7 +3,7 @@ package gt.edu.umg.aquatech.pagosconsumer;
 import java.util.List;
 import java.util.Set;
 
-/** Traduce (estado HTTP + cuerpo) a un {@link Resultado}. Lógica pura, sin Spring. */
+/** Traduce (estado HTTP + cuerpo) a un {@link Resultado}. */
 public final class ClasificadorRespuesta {
 
     private static final List<String> CODIGOS_CONOCIDOS = List.of(
@@ -33,7 +33,7 @@ public final class ClasificadorRespuesta {
         if (REINTENTABLES.contains(status)) {
             return Resultado.FALLIDO_REINTENTABLE;
         }
-        // 400, 403, 422 y cualquier otro código inesperado (401, 404, 2xx distinto de 201...)
+        // 400, 403, 422 y cualquier otro estado inesperado.
         return Resultado.FALLIDO_DEFINITIVO;
     }
 

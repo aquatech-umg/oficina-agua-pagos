@@ -39,7 +39,6 @@ public class TransmisionesService {
         this.productor = productor;
     }
 
-    /** GET /transmissions/{paymentId} */
     public Transmission consultar(long pagoId) {
         String llave = payloads.llave(pagoId);
         Map<String, AttributeValue> banco = control.leer(llave + "#" + Destino.BANCO.name());
@@ -51,12 +50,11 @@ public class TransmisionesService {
     }
 
     /**
-     * POST /transmissions/{paymentId}/retry. Pasa a PENDIENTE los destinos pedidos que estén FAILED y los
-     * publica de inmediato con la MISMA llave y el MISMO payload guardado (no hay riesgo de duplicado: los
-     * destinos son idempotentes). Los destinos que no están FAILED no se tocan.
+     * Reencola los destinos pedidos que estén FAILED, con la misma llave y el mismo payload
+     * (los destinos son idempotentes).
      */
     public Transmission reintentar(long pagoId, RetryRequest.DestinationEnum destino) {
-        consultar(pagoId);   // 404 si el pago no existe
+        consultar(pagoId);
         String llave = payloads.llave(pagoId);
 
         List<Destino> elegidos = switch (destino) {

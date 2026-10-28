@@ -1,58 +1,69 @@
 # Consumir el banco y el ERP con Feign
 
-Regla del equipo y del docente: las llamadas a los sistemas externos se hacen con **clientes Feign de Spring Boot**. Para el banco y el ERP, el docente pide generarlos desde sus specs (`library = spring-cloud`) en vez de escribirlos a mano. Solo aplica al `pagos-consumer`.
+Las llamadas a los sistemas externos se hacen con **clientes Feign de Spring Boot generados desde los contratos del docente** (`library = spring-cloud`), en vez de escribirlos a mano. Solo aplica a `pagos-consumer`.
 
-## Versión confirmada (AQ-111)
+## Versión Confirmada
 
 | Spring Boot | Spring Cloud | OpenFeign |
 |---|---|---|
 | 4.1.1 | **2025.1.3** (Oakwood) | 5.0.3 |
 
-- El anuncio de Spring Cloud 2025.1.3 dice que el tren está basado en Boot 4.0.x y es compatible con la línea 4.1.x: https://spring.io/blog/2026/08/20/spring-cloud-2025-1-3-has-been-released/
+El anuncio de Spring Cloud 2025.1.3 dice que el tren es compatible con la línea 4.1.x: https://spring.io/blog/2026/08/20/spring-cloud-2025-1-3-has-been-released/
 
-## Qué ya está aplicado en `pagos-consumer`
+## Cómo está implementado
 
+### 1. Generación de los clientes
 
-| Archivo | Cambio |
-|---|---|
-| `pom.xml` | Propiedad `spring-cloud.version` = `2025.1.3`; BOM `spring-cloud-dependencies` en `dependencyManagement`; dependencia `spring-cloud-starter-openfeign` |
-| `PagosConsumerApplication.java` | Anotación `@EnableFeignClients` (escanea el paquete base y sus subpaquetes) |
-| `application.yaml` | Timeouts del docente para todos los clientes: conexión 2 s y lectura 3 s (`spring.cloud.openfeign.client.config.default`) |
+Los contratos están en `pagos-consumer/src/main/resources/openapi/` y **no se modifican**. El `openapi-generator-maven-plugin` (versión 7.21.0, la misma del producer) tiene una ejecución por contrato:
 
-Para comprobarlo, desde `pagos-consumer`: `.\mvnw.cmd clean compile` y luego `.\mvnw.cmd spring-boot:run`.
+| Ejecución | Contrato | Paquetes generados | Salida |
+|---|---|---|---|
+| `banco` | `bank-payments-api.yaml` | `...pagosconsumer.cliente.banco` (`.api`, `.model`, `.config`) | `target/generated-sources/banco` |
+| `erp` | `erp-payments-api.yaml` | `...pagosconsumer.cliente.erp` (`.api`, `.model`, `.config`) | `target/generated-sources/erp` |
 
+Opciones: `generatorName = spring`, `library = spring-cloud`, `useSpringBoot4`, `useJackson3`, `useTags`, `openApiNullable = false` y `documentationProvider = none`. Cada ejecución tiene su propio `configPackage`: sin eso los dos contratos generan la misma clase `ClientConfiguration` y chocan.
 
-### 1. Una ejecución del generador por cada spec
+Clientes que se generan: `BankPaymentsApiClient`, `BankHealthApiClient`, `ErpPagosApiClient` y `ErpSaludApiClient`. Los dos primeros de cada contrato envían los pagos; los de salud no se usan en el flujo.
 
-Los specs ya están en `src/main/resources/openapi/` y **no se modifican**. Se agregan dos ejecuciones al `openapi-generator-maven-plugin` (el mismo plugin y versión 7.21.0 que usa el producer), cada una con su `<id>` y sus propios paquetes, para que no choquen los nombres de clases de ambos specs:
-
-| Ejecución | `inputSpec` | `apiPackage` / `modelPackage` |
-|---|---|---|
-| `banco` | `.../openapi/bank-payments-api.yaml` | `gt.edu.umg.aquatech.pagosconsumer.cliente.banco` (`.api` / `.model`) |
-| `erp` | `.../openapi/erp-payments-api.yaml` | `gt.edu.umg.aquatech.pagosconsumer.cliente.erp` (`.api` / `.model`) |
-
-En ambas: `generatorName = spring` y `library = spring-cloud`. El resultado son interfaces anotadas con `@FeignClient` en `target/generated-sources/openapi`.
-
-**Revisa la clase generada:** de su anotación `@FeignClient` salen el nombre del cliente y la propiedad que fija su URL. Usa esa propiedad tal cual en el `application.yaml`, apuntando a `BANK_BASE_URL` y `ERP_BASE_URL`. Si el generador no es compatible con las opciones `useSpringBoot4` y `useJackson3` del producer con esta biblioteca, probar sin ellas y revisar los imports generados.
-
-### 2. Configuración que debe cumplir el cliente
+### 2. Configuración (`application.yaml`)
 
 | Qué | Cómo |
 |---|---|
-| API key | un bean `feign.RequestInterceptor` que agregue el header de llave con `BANK_API_KEY` o `ERP_API_KEY` según el cliente; nunca en el código ni en el repo |
-| Idempotencia del banco | el header `Idempotency-Key` es un parámetro del método generado: pasar `idempotencyKey` del ítem de `pagos-control` |
-| Idempotencia del ERP | va en el cuerpo (`documento_origen.numero`), con el mismo valor |
-| Reintentos | **no activar el `Retryer` de Feign.** Los reintentos los controla RabbitMQ (colas de espera y dead-letter), así cada intento queda en `pagos-logs` |
+| URL de cada cliente | `bankPayments.url`, `bankHealth.url`, `erpPagos.url`, `erpSalud.url`, tomadas de `BANK_BASE_URL` y `ERP_BASE_URL`. Los nombres de propiedad salen de la anotación `@FeignClient` generada |
+| Nombre del cliente | `bankPayments.name` (y los otros tres) es **obligatorio**: el `contextId` generado lo usa por defecto y sin él el contexto de Spring no arranca |
+| Timeouts | conexión 2 s y lectura 3 s para todos (`spring.cloud.openfeign.client.config.default`) |
+| Campos opcionales | `spring.jackson.default-property-inclusion: non_null`: los simuladores responden `400 VALIDATION_ERROR` si un campo opcional (por ejemplo `payer.taxId`) viaja en `null` |
+| Confirmaciones | `spring.rabbitmq.publisher-confirm-type: correlated`, necesario para publicar en las colas de espera y en `pagos.dlq` |
 
-### 3. Traducir las respuestas a la política de reintentos
+### 3. Autenticación
 
-Feign lanza `FeignException` (con el código en `status()`) cuando el destino responde con error, y `RetryableException` ante timeouts o fallos de conexión. El consumer debe convertirlos así (la tabla completa está en [`diseno-control-pagos.md`](diseno-control-pagos.md), sección 6):
+| Mecanismo | Variables | Detalle |
+|---|---|---|
+| `x-api-key` (lo que exige el contrato) | `BANK_API_KEY`, `ERP_API_KEY` | Lo agrega el interceptor que genera openapi-generator. Una variable vacía no envía el header |
+| `Authorization: Basic` (opcional) | `SIMULADOR_USUARIO`, `SIMULADOR_PASSWORD` | Lo agrega `AutenticacionDestinosConfig`. Vacías: no se envía |
+
+Ninguna llave va en el código ni en el repositorio.
+
+### 4. Adaptadores
+
+`DestinoClient` es el puerto hacia un destino. `BancoDestinoClient` y `ErpDestinoClient` lo implementan: convierten el payload guardado en `pagos-control` al modelo generado, llaman al cliente Feign y devuelven un `RespuestaDestino` sin tipos de Feign (`RespuestasFeign` hace esa traducción).
+
+- **Idempotencia del banco:** el header `Idempotency-Key` es un parámetro del método generado; se pasa `idempotencyKey` del ítem.
+- **Idempotencia del ERP:** va en el cuerpo (`documento_origen.numero`), con el mismo valor.
+- **Payload inválido:** si el payload guardado no entra al modelo del contrato o no pasa su validación, se registra como `400 PAYLOAD_INVALIDO` y el ítem queda `FALLIDO` (ningún reintento lo arregla).
+- **Escenarios del simulador:** si se definen `BANK_SIMULATION_SCENARIO` o `ERP_SIMULATION_SCENARIO`, el consumer envía el header `X-Simulation-Scenario`. Solo para pruebas.
+
+### 5. Traducción de las respuestas
+
+Feign lanza `FeignException` (estado en `status()`) cuando el destino responde con error, y `RetryableException` ante timeouts o fallos de conexión (estado 0). La tabla completa está en [`diseno-control-pagos.md`](diseno-control-pagos.md), sección 6.
 
 | Situación | Acción |
 |---|---|
-| 201 | Registrar el éxito en `pagos-logs` |
-| 409 de duplicado | Tratar como éxito |
-| 409 de llave reutilizada, 400, 403, 422 | Registrar el fallo y mandar a `pagos.dlq`, sin reintento |
-| 429, 500, 502, 503, 504, timeout | Registrar el fallo y mandar a la cola de espera |
+| 201 | Registrar el éxito y el comprobante; el ítem pasa a `ENVIADO` |
+| 409 de duplicado | Éxito: `ENVIADO`, con el comprobante original que viene en el cuerpo |
+| 409 de llave reutilizada, 400, 403, 422 | Registrar el fallo, mandar a `pagos.dlq` y marcar `FALLIDO`, sin reintento |
+| 429, 500, 502, 503, 504, timeout | Registrar el fallo y mandar a la cola de espera (respeta `Retry-After`) |
 
-Para distinguir los dos `409` hay que leer el código de error del cuerpo de la respuesta, no solo el estado HTTP.
+Para distinguir los dos `409` se lee el código de error del cuerpo, no solo el estado HTTP.
+
+**Reintentos:** el `Retryer` de Feign **no se activa** (por defecto es `NEVER_RETRY`). Los reintentos los controla RabbitMQ con las colas de espera, así cada intento queda registrado en `pagos-logs`.

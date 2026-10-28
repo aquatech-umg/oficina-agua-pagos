@@ -13,26 +13,21 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Arma el cuerpo (payload) de cada destino a partir de un pago (sección 8 del diseño).
- * Sigue al pie de la letra los contratos del docente: bank-payments-api.yaml (BankPaymentRequest)
- * y erp-payments-api.yaml (ErpRegistroPago). Sin dependencias de Spring: se registra como bean
- * en {@link ProducerConfig}.
- *
- * No se envía el DPI ni el NIT (taxId / nit son opcionales en ambos contratos), decisión 6 del diseño.
+ * Arma el cuerpo de cada destino según los contratos del docente (BankPaymentRequest y ErpRegistroPago).
+ * No envía DPI ni NIT: son opcionales en ambos contratos.
  */
 public class PayloadFactory {
 
     private static final ZoneId GUATEMALA = ZoneId.of("America/Guatemala");
 
-    // channel del banco: CASH, CARD, BANK_TRANSFER o CHECK (este último el banco lo rechaza con 422).
+    // El banco rechaza CHECK con 422.
     private static final Map<String, String> CANAL_BANCO = Map.of(
             "EFECTIVO", "CASH",
             "TARJETA", "CARD",
             "TRANSFERENCIA", "BANK_TRANSFER",
             "CHEQUE", "CHECK");
 
-    // documento_origen.tipo del ERP es obligatorio. El ERP SÍ acepta forma_pago CHEQUE; como el contrato
-    // no tiene un tipo propio para cheque se usa RECIBO_CAJA (decisión 7 del diseño, por confirmar).
+    // documento_origen.tipo es obligatorio y el contrato no tiene tipo para cheque: se usa RECIBO_CAJA.
     private static final String TIPO_DOCUMENTO_POR_DEFECTO = "RECIBO_CAJA";
     private static final Map<String, String> TIPO_DOCUMENTO_ERP = Map.of(
             "EFECTIVO", "RECIBO_CAJA",
@@ -44,21 +39,20 @@ public class PayloadFactory {
     private final String teamCode;
 
     /**
-     * @param equipo   prefijo de la llave de idempotencia, p. ej. EQA (queda EQA-000123)
-     * @param teamCode código de equipo de los contratos: EQUIPO_A, EQUIPO_B, EQUIPO_C o EQUIPO_D;
-     *                 debe coincidir con la API key (variable TEAM_CODE)
+     * {@code equipo} es el prefijo de la llave (EQA); {@code teamCode} es el código de los contratos
+     * (EQUIPO_A) y debe coincidir con la API key.
      */
     public PayloadFactory(String equipo, String teamCode) {
         this.equipo = equipo;
         this.teamCode = teamCode;
     }
 
-    /** Llave estable: &lt;EQUIPO&gt;-&lt;pago_id con 6 dígitos&gt;, p. ej. EQA-000123. Cumple ^[A-Za-z0-9_-]+$ */
+    /** Llave estable por pago, p. ej. EQA-000123 (prefijo e id con 6 dígitos). */
     public String llave(long pagoId) {
         return "%s-%06d".formatted(equipo, pagoId);
     }
 
-    /** Decisión 5 del diseño (por confirmar con Marvin): CLI- más el id con 4 dígitos. */
+    /** Código de cliente para los destinos: CLI- más el id con 4 dígitos. */
     public String codigoCliente(long clienteId) {
         return "CLI-%04d".formatted(clienteId);
     }
@@ -91,7 +85,7 @@ public class PayloadFactory {
         m.put("amount", monto);
         m.put("transactionDate", fecha(p));
         m.put("channel", CANAL_BANCO.getOrDefault(metodo, metodo));
-        m.put("description", "Servicio de agua " + periodo(p));       // máximo 140 caracteres
+        m.put("description", "Servicio de agua " + periodo(p));
         return m;
     }
 
@@ -129,7 +123,7 @@ public class PayloadFactory {
         m.put("documento_origen", documento);
         m.put("contribuyente", contribuyente);
         m.put("periodo_fiscal", Map.of("anio", periodo.getYear(), "mes", periodo.getMonthValue()));
-        m.put("forma_pago", metodo);               // EFECTIVO, TARJETA, TRANSFERENCIA o CHEQUE
+        m.put("forma_pago", metodo);
         m.put("fecha_pago", fecha(p));
         m.put("total", total.toPlainString());
         m.put("detalle", detalle);

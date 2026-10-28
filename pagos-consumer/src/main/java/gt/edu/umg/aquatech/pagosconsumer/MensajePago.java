@@ -8,10 +8,7 @@ public record MensajePago(long pagoId, String destino, String idempotencyKey) {
         return idempotencyKey + "#" + destino;
     }
 
-    /**
-     * Mismo formato que publica el producer. idempotencyKey cumple ^[A-Za-z0-9_-]+$ y destino es BANCO o ERP:
-     * no hace falta escapar.
-     */
+    /** Mismo formato que publica el producer; la llave y el destino no necesitan escape. */
     public String aJson() {
         return "{\"pagoId\":%d,\"destino\":\"%s\",\"idempotencyKey\":\"%s\"}"
                 .formatted(pagoId, destino, idempotencyKey);
