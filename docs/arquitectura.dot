@@ -1,0 +1,81 @@
+digraph arquitectura {
+  rankdir=LR; newrank=true; compound=true; splines=true;
+  nodesep=0.45; ranksep=1.0; pad=0.3; bgcolor="white";
+  fontname="DejaVu Sans"; labelloc=t; fontsize=22;
+  label="Oficina del Agua - Fase 2: arquitectura de la solución integrada\n(los números de las flechas se explican en la tabla del README)";
+  node [fontname="DejaVu Sans", fontsize=13, shape=box, style="rounded,filled", fillcolor="white", color="#444444", margin="0.18,0.10"];
+  edge [fontname="DejaVu Sans Bold", fontsize=14, color="#555555", arrowsize=0.8, fontcolor="#B00020"];
+
+  subgraph cluster_clientes { label="Clientes"; style="rounded,filled"; fillcolor="#F5F5F5"; color="#BDBDBD"; fontsize=15;
+    publico [label="Usuario público\n(navegador)"];
+    personal [label="Personal de la oficina\n(navegador)"];
+    apicli [label="Equipo / docente\n(curl, Swagger UI)"];
+  }
+
+  subgraph cluster_mono { label="Monolito heredado (NO se modifica)"; style="rounded,filled"; fillcolor="#FFF3E0"; color="#EF6C00"; fontsize=15;
+    mono [label="Oficina del Agua\nLaravel 13 · PHP 8.3\n:8000", fillcolor="#FFE0B2"];
+  }
+
+  subgraph cluster_db { label="MariaDB (oficina-agua-infra)"; style="rounded,filled"; fillcolor="#ECEFF1"; color="#607D8B"; fontsize=15;
+    dbp [label="db-primary\n:3306\n(el monolito escribe aquí)", shape=cylinder, fillcolor="#CFD8DC"];
+    dbr [label="db-replica\n:3307 · solo lectura\n(usuario lectura)", shape=cylinder, fillcolor="#CFD8DC"];
+  }
+
+  subgraph cluster_web { label="Next.js (oficina-agua-rag/web-bff)"; style="rounded,filled"; fillcolor="#E3F2FD"; color="#1565C0"; fontsize=15;
+    next [label="web-bff · Next.js :3000\npágina /consulta + widget del chat\nAPI /api/consulta y /api/chat", fillcolor="#BBDEFB"];
+  }
+
+  subgraph cluster_f1 { label="Feature 1 · Consulta pública con captcha"; style="rounded,filled"; fillcolor="#E8F5E9"; color="#2E7D32"; fontsize=15;
+    consulta [label="consulta-service\nSpring Boot :8082\nlímite por IP + captcha", fillcolor="#C8E6C9"];
+  }
+
+  subgraph cluster_f2 { label="Feature 2 · Chatbot con RAG"; style="rounded,filled"; fillcolor="#F3E5F5"; color="#6A1B9A"; fontsize=15;
+    rag [label="rag-service\nSpring Boot :8081", fillcolor="#E1BEE7"];
+    pgv [label="rag-db\nPostgreSQL + pgvector\n:5433", shape=cylinder, fillcolor="#E1BEE7"];
+    ddbchat [label="dynamodb-chat\n:8010\n(historial)", shape=cylinder, fillcolor="#E1BEE7"];
+    ollama [label="Ollama :11434\nqwen3:8b · bge-m3\n(en la máquina)", fillcolor="#E1BEE7"];
+  }
+
+  subgraph cluster_f3 { label="Feature 3 · Envío de pagos por colas (MÓDULO ASIGNADO)"; style="rounded,filled"; fillcolor="#FFEBEE"; color="#C62828"; fontsize=15; penwidth=2;
+    prod [label="pagos-producer\nSpring Boot :8083\ndetecta pagos · API /retry", fillcolor="#FFCDD2"];
+    rmq [label="RabbitMQ :5672\npagos.banco · pagos.erp\ncolas de espera (2-32 s)\npagos.dlq", shape=box3d, fillcolor="#FFCDD2"];
+    cons [label="pagos-consumer\nSpring Boot :8084\nreintentos · dead-letter", fillcolor="#FFCDD2"];
+    ddbp [label="dynamodb-pagos :8012\npagos-control · pagos-logs", shape=cylinder, fillcolor="#FFCDD2"];
+  }
+
+  subgraph cluster_f4 { label="Feature 4 · Replicación asíncrona a NoSQL"; style="rounded,filled"; fillcolor="#FFFDE7"; color="#F9A825"; fontsize=15;
+    sync [label="sync-service\nSpring Boot :8085\ndiff-upsert", fillcolor="#FFF59D"];
+    ddbs [label="dynamodb-local :8011\ntablas clientes · pagos", shape=cylinder, fillcolor="#FFF59D"];
+  }
+
+  subgraph cluster_ext { label="Sistemas externos"; style="rounded,filled"; fillcolor="#EDE7F6"; color="#4527A0"; fontsize=15;
+    hcap [label="hCaptcha\n(siteverify)", fillcolor="#D1C4E9"];
+    banco [label="Banco (simulador del docente)\nAPI Gateway · AWS", fillcolor="#D1C4E9"];
+    erp [label="ERP municipal (simulador)\nAPI Gateway · AWS", fillcolor="#D1C4E9"];
+  }
+
+  personal -> mono [label=" 1 "];
+  mono -> dbp [label=" 2 "];
+  dbp -> dbr [label=" 3 ", style=dashed, color="#607D8B"];
+  publico -> next [label=" 4 "];
+  next -> consulta [label=" 5 "];
+  consulta -> dbr [label=" 6 "];
+  consulta -> hcap [label=" 7 "];
+  next -> rag [label=" 8 "];
+  rag -> pgv [label=" 9 "];
+  rag -> ollama [label=" 10 "];
+  rag -> ddbchat [label=" 11 "];
+  rag -> dbr [label=" 12 "];
+  prod -> dbr [label=" 13 "];
+  prod -> ddbp [label=" 14 "];
+  prod -> rmq [label=" 15 "];
+  rmq -> cons [label=" 16 "];
+  cons -> ddbp [label=" 17 "];
+  cons -> banco [label=" 18 "];
+  cons -> erp [label=" 19 "];
+  cons -> rmq [label=" 20 ", style=dashed];
+  apicli -> prod [label=" 21 "];
+  sync -> dbr [label=" 22 "];
+  sync -> ddbs [label=" 23 "];
+  apicli -> sync [label=" 24 "];
+}
