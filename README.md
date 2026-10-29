@@ -19,7 +19,6 @@ El monolito heredado (Laravel) **no se modifica**. Este repositorio contiene dos
 4. [Módulo asignado: envío de pagos por colas](#4-módulo-asignado-envío-de-pagos-por-colas)
 5. [Seguridad de la información](#5-seguridad-de-la-información)
 6. [Estructura del repositorio y flujo de trabajo](#6-estructura-del-repositorio-y-flujo-de-trabajo)
-7. [Cómo se elaboró esta documentación](#7-cómo-se-elaboró-esta-documentación)
 
 ---
 
@@ -413,7 +412,3 @@ oficina-agua-pagos/
 ```
 
 **Flujo de trabajo del equipo:** una rama por tarjeta de Jira (`feature/AQ-XX-descripcion`), commits con la clave al inicio (`AQ-XX: mensaje`) y nada directo a `main`: todo por pull request con la clave en el título.
-
-## 7. Cómo se elaboró esta documentación
-
-La documentación de arquitectura se redactó con ayuda de **Claude (Anthropic)**: se le pidió revisar el código, los `docker-compose`, los archivos de configuración y los README de los seis repositorios para describir la arquitectura real. Después se **contrastó contra el código** cada componente, puerto, variable y conexión del diagrama. Lo que no existe de verdad se corrigió o se quitó; por ejemplo, el despliegue en ECS Fargate está documentado pero nunca se ejecutó, así que no figura como parte de la solución.
