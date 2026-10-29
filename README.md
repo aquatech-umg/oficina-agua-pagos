@@ -126,6 +126,8 @@ cp oficina-agua-rag/web-bff/.env.example oficina-agua-rag/web-bff/.env.local
 
 Define contraseñas propias en esos archivos y usa la **misma clave de lectura** (`DB_LECTURA_PASSWORD`) en todos los servicios que leen la réplica.
 
+Los servicios Spring Boot de este repo (`pagos-producer` y `pagos-consumer`) leen ese mismo `oficina-agua-pagos/.env` al arrancar (`spring.config.import`), así que no hace falta definir variables en cada consola. Las variables de la consola, si se definen, tienen prioridad.
+
 **3. Levantar toda la infraestructura** (bases, réplica, DynamoDB, RabbitMQ):
 
 ```bash
@@ -164,7 +166,7 @@ Los usuarios de los datos de prueba no pueden iniciar sesión; para entrar se cr
 | rag-service | `oficina-agua-rag/rag-service` | `./mvnw spring-boot:run` |
 | web-bff | `oficina-agua-rag/web-bff` | `npm install && npm run dev` |
 
-(En Windows se usa `mvnw.cmd`.) Cada servicio lee sus credenciales de **variables de entorno**; la sección 4.6 lista las de mis servicios. Para el chatbot hay que tener Ollama con los modelos descargados (`ollama pull qwen3:8b` y `ollama pull bge-m3`).
+(En Windows se usa `mvnw.cmd`.) Cada servicio lee sus credenciales de **variables de entorno**; `pagos-producer` y `pagos-consumer` las toman del `.env` de este repo sin configurar nada más (sección 4.5). La sección 4.6 lista las de mis servicios. Para el chatbot hay que tener Ollama con los modelos descargados (`ollama pull qwen3:8b` y `ollama pull bge-m3`).
 
 ---
 
@@ -276,16 +278,17 @@ cd oficina-agua-pagos && docker compose up -d                # RabbitMQ y Dynamo
 
 Para **repetir las pruebas desde cero** sin tocar la réplica ni sus datos: `docker compose down -v && docker compose up -d` dentro de `oficina-agua-pagos` (borra solo RabbitMQ y DynamoDB de pagos).
 
-**Variables de entorno.** En cada terminal (PowerShell: `$env:NOMBRE="valor"`; bash: `export NOMBRE=valor`):
+**Variables de entorno.** Copia `.env.example` a `.env` en la raíz de este repo y llena la clave de lectura y las llaves del docente: los dos servicios lo leen solos al arrancar (`spring.config.import: optional:file:.env[.properties],optional:file:../.env[.properties]`). Si prefieres, también se pueden definir en cada terminal (PowerShell: `$env:NOMBRE="valor"`; bash: `export NOMBRE=valor`); las de la terminal tienen prioridad sobre el `.env`. No dejes vacía una variable que tiene valor por defecto (por ejemplo `DB_LECTURA_USER`): un valor vacío le gana al defecto.
 
 | Servicio | Variable | Valor / descripción |
 |---|---|---|
 | producer | `DB_REPLICA_HOST`, `DB_REPLICA_PORT` | `localhost`, `3307` |
 | producer | `DB_LECTURA_USER`, `DB_LECTURA_PASSWORD` | `lectura` y la clave definida en `oficina-agua-infra/.env` |
 | producer | `TEAM_CODE` | `EQUIPO_A` (debe coincidir con la llave) |
+| producer | `PAGOS_EQUIPO` | `EQA-AQT`: prefijo de la llave de idempotencia. **No se cambia después de enviar pagos** (con otro prefijo el destino los toma como pagos distintos). |
 | producer | `PAGOS_DESDE` | `2026-09-19` (**importante**: si no se define, arranca en 1970 y procesa los ~37 mil pagos) |
 | producer y consumer | `DYNAMODB_ENDPOINT` | `http://localhost:8012` |
-| producer y consumer | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `us-east-1`, `local`, `local` (DynamoDB Local) |
+| producer y consumer | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `us-east-1`, `local`, `local` (DynamoDB Local). Con `DYNAMODB_ENDPOINT` definido, el cliente usa estas llaves de forma explícita, así funcionan también desde el `.env` (el SDK de AWS por sí solo no lee las propiedades de Spring). |
 | producer y consumer | `RABBITMQ_USER`, `RABBITMQ_PASSWORD` | Los de `oficina-agua-pagos/.env` |
 | consumer | `BANK_BASE_URL`, `ERP_BASE_URL` | URL base de los simuladores del docente |
 | consumer | `BANK_API_KEY`, `ERP_API_KEY` | Llave `x-api-key` entregada por el docente |
@@ -369,7 +372,7 @@ En el producer define `PAGOS_EQUIPO=EQA-AQT` y `PAGOS_DESDE=<fecha de hoy>`: as�
 
 ## 5. Seguridad de la información
 
-- **Ninguna credencial está en el repositorio.** Las URLs, llaves (`BANK_API_KEY`, `ERP_API_KEY`) y claves de bases de datos se leen de **variables de entorno**. Los archivos `.env` reales están en `.gitignore`; el repo solo trae `.env.example`, con valores vacíos o de ejemplo (`changeme`, `local` para DynamoDB Local).
+- **Ninguna credencial está en el repositorio.** Las URLs, llaves (`BANK_API_KEY`, `ERP_API_KEY`) y claves de bases de datos se leen de **variables de entorno** o del `.env` local, que nunca se sube. Los archivos `.env` reales están en `.gitignore`; el repo solo trae `.env.example`, con valores vacíos o de ejemplo (`changeme`, `local` para DynamoDB Local).
 - Los `application.yaml` solo tienen referencias del tipo `${BANK_API_KEY:}`, nunca valores.
 - **Historial de Git revisado:** nunca se versionó un archivo `.env`, y no hay llaves, tokens ni contraseñas en ningún commit (se comprobó con `git log --all -S<cadena>` y buscando asignaciones de `password`, `key`, `token` y `secret`). La única cadena parecida a un token es una constante de una prueba unitaria que codifica un usuario de ejemplo inventado.
 - Para repetir la verificación:
@@ -385,7 +388,7 @@ En el producer define `PAGOS_EQUIPO=EQA-AQT` y `PAGOS_DESDE=<fecha de hoy>`: as�
 oficina-agua-pagos/
 ├── README.md
 ├── docker-compose.yml            RabbitMQ y DynamoDB Local (pagos-control y pagos-logs)
-├── .env.example                  Variables de ejemplo (copiar a .env)
+├── .env.example                  Variables de ejemplo (copiar a .env; lo leen el compose y los dos servicios)
 ├── docs/
 │   ├── arquitectura.png / .svg / .dot   Diagrama de la solución integrada
 │   ├── diseno-control-pagos.md          Diseño del control de pagos

@@ -1,6 +1,10 @@
 spring:
   application:
     name: pagos-consumer
+  config:
+    # Lee el .env local (no se sube a Git): primero el de este módulo y luego el de la raíz del repo.
+    # optional: si no existe, arranca igual. Las variables de la consola siguen teniendo prioridad.
+    import: optional:file:.env[.properties],optional:file:../.env[.properties]
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}

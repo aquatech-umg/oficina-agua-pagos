@@ -10,6 +10,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClientBuilder;
@@ -32,14 +34,23 @@ public class ProducerConfig {
         return QueueBuilder.durable(Destino.ERP.cola()).build();
     }
 
-    /** El endpoint solo se define en local (DynamoDB Local). */
+    /**
+     * El endpoint solo se define en local (DynamoDB Local). En ese caso las llaves se pasan
+     * explícitamente: el SDK de AWS no lee las propiedades de Spring (como las del .env), solo
+     * variables del sistema o ~/.aws/credentials. DynamoDB Local acepta cualquier llave.
+     * Sin endpoint (AWS real) se usa la cadena de credenciales por defecto del SDK.
+     */
     @Bean
     DynamoDbClient dynamoDbClient(
             @Value("${DYNAMODB_ENDPOINT:}") String endpoint,
-            @Value("${AWS_REGION:us-east-1}") String region) {
+            @Value("${AWS_REGION:us-east-1}") String region,
+            @Value("${AWS_ACCESS_KEY_ID:local}") String accessKey,
+            @Value("${AWS_SECRET_ACCESS_KEY:local}") String secretKey) {
         DynamoDbClientBuilder builder = DynamoDbClient.builder().region(Region.of(region));
         if (!endpoint.isBlank()) {
-            builder.endpointOverride(URI.create(endpoint));
+            builder.endpointOverride(URI.create(endpoint))
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create(accessKey, secretKey)));
         }
         return builder.build();
     }
